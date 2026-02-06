@@ -1,0 +1,355 @@
+name: Dataset downloader and splitter
+inputs:
+  - {name: z_test_cdn, type: String, optional: false}
+  - {name: bearer_token, type: string, optional: true, default: ""}
+  - {name: test_size, type: Float, optional: true, default: "0.3"}
+  - {name: val_split, type: Float, optional: true, default: "0.5"}
+  - {name: random_state, type: Integer, optional: true, default: "42"}
+  - {name: batch_size, type: Integer, optional: true, default: "32"}
+  - {name: num_workers, type: Integer, optional: true, default: "0"}
+
+outputs:
+  - {name: tensor_values, type: Data}
+  - {name: train_dataset, type: Data}
+  - {name: val_dataset, type: Data}
+  - {name: test_dataset, type: Data}
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:vtest4
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, os, sys, tempfile, json, shutil, logging
+        import numpy as np
+        import pandas as pd
+        import torch
+        from torch.utils.data import Dataset, DataLoader, TensorDataset
+        import requests
+        from requests.adapters import HTTPAdapter
+        try:
+            from urllib3.util import Retry
+        except Exception:
+            from urllib3 import Retry
+        from sklearn.model_selection import train_test_split
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--z_test_cdn', required=True)
+        parser.add_argument('--bearer_token', default="")
+        parser.add_argument('--test_size', type=float, default=0.3)
+        parser.add_argument('--val_split', type=float, default=0.5)
+        parser.add_argument('--random_state', type=int, default=42)
+        parser.add_argument('--batch_size', type=int, default=32)
+        parser.add_argument('--num_workers', type=int, default=0)
+        parser.add_argument('--tensor_values', required=True)
+        parser.add_argument('--train_dataset', required=True)
+        parser.add_argument('--val_dataset', required=True)
+        parser.add_argument('--test_dataset', required=True)
+        args = parser.parse_args()
+
+        logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+        logger = logging.getLogger("pytorch_dataset_downloader_splitter")
+
+        # Setup session with retry logic
+        session = requests.Session()
+        retry = Retry(total=5, backoff_factor=1, status_forcelist=[500,502,503,504])
+        session.mount("http://", HTTPAdapter(max_retries=retry))
+        session.mount("https://", HTTPAdapter(max_retries=retry))
+
+        # Setup headers with bearer token if provided
+        headers = {}
+        if args.bearer_token and os.path.exists(args.bearer_token):
+            with open(args.bearer_token, "r") as f:
+                token = f.read().strip()
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+
+        def download_file(url):
+            try:
+                logger.info("Downloading from: %s", url)
+                r = session.get(url, headers=headers, timeout=60)
+                r.raise_for_status()
+                fd, tmp = tempfile.mkstemp()
+                os.close(fd)
+                with open(tmp, "wb") as f:
+                    f.write(r.content)
+                logger.info("Successfully downloaded to: %s", tmp)
+                return tmp
+            except Exception as e:
+                logger.error("Download failed for %s: %s", url, str(e))
+                raise
+
+        def load_data_multi_format(file_path):
+            logger.info("Loading data from: %s", file_path)
+            
+            # List of loading strategies to try
+            strategies = [
+                # Strategy 1: PyTorch Tensor
+                {
+                    'name': 'PyTorch Tensor',
+                    'func': lambda: torch.load(file_path, map_location='cpu').numpy() 
+                            if isinstance(torch.load(file_path, map_location='cpu'), torch.Tensor)
+                            else torch.load(file_path, map_location='cpu')
+                },
+                # Strategy 2: NumPy array (.npy)
+                {
+                    'name': 'NumPy (.npy)',
+                    'func': lambda: np.load(file_path, allow_pickle=True)
+                },
+                # Strategy 3: NumPy compressed (.npz)
+                {
+                    'name': 'NumPy (.npz)',
+                    'func': lambda: np.load(file_path, allow_pickle=True)['data']
+                },
+                # Strategy 4: Parquet
+                {
+                    'name': 'Parquet',
+                    'func': lambda: pd.read_parquet(file_path, engine="pyarrow").values
+                },
+                # Strategy 5: CSV
+                {
+                    'name': 'CSV',
+                    'func': lambda: pd.read_csv(file_path).values
+                },
+                # Strategy 6: Excel
+                {
+                    'name': 'Excel',
+                    'func': lambda: pd.read_excel(file_path).values
+                },
+                # Strategy 7: Tab-separated values
+                {
+                    'name': 'TSV',
+                    'func': lambda: pd.read_csv(file_path, sep='\t').values
+                },
+            ]
+            
+            # Try each strategy
+            last_error = None
+            for strategy in strategies:
+                try:
+                    logger.info("Trying to load as: %s", strategy['name'])
+                    data = strategy['func']()
+                    
+                    # Convert to numpy array if needed
+                    if isinstance(data, torch.Tensor):
+                        data = data.numpy()
+                    elif not isinstance(data, np.ndarray):
+                        data = np.array(data)
+                    
+                    logger.info("✓ Successfully loaded as %s with shape: %s", 
+                               strategy['name'], data.shape)
+                    return data
+                    
+                except Exception as e:
+                    logger.debug("Failed to load as %s: %s", strategy['name'], str(e))
+                    last_error = e
+                    continue
+            
+            # If all strategies failed, raise the last error
+            logger.error("All loading strategies failed!")
+            raise RuntimeError(f"Could not load file with any supported format. Last error: {last_error}")
+
+        def save_tensor_output(tensor, output_path, data_name):
+            os.makedirs(output_path, exist_ok=True)
+            save_path = os.path.join(output_path, f"{data_name}.pt")
+            
+            torch.save(tensor, save_path)
+            logger.info("Saved %s to: %s", data_name, save_path)
+            
+            # Write metadata
+            with open(output_path + ".meta.json", "w") as f:
+                json.dump({
+                    "tensor_path": save_path,
+                    "shape": list(tensor.shape),
+                    "dtype": str(tensor.dtype)
+                }, f)
+            
+            return save_path
+
+        def save_pytorch_dataset(dataset_tensor, output_path, dataset_name):
+            os.makedirs(output_path, exist_ok=True)
+            save_path = os.path.join(output_path, f"{dataset_name}.pt")
+            
+            # Save the tensor
+            torch.save(dataset_tensor, save_path)
+            
+            logger.info("Saved %s to: %s", dataset_name, save_path)
+            
+            # Write metadata
+            with open(output_path + ".meta.json", "w") as f:
+                json.dump({
+                    "dataset_path": save_path,
+                    "shape": list(dataset_tensor.shape),
+                    "dtype": str(dataset_tensor.dtype)
+                }, f)
+            
+            return save_path
+
+        try:
+            # ============================================
+            # Download and Load Data
+            # ============================================
+            logger.info("Downloading Z_test data...")
+            z_test_file = download_file(args.z_test_cdn)
+            Z_test = load_data_multi_format(z_test_file)
+            os.remove(z_test_file)
+            
+            logger.info("Z_test shape: %s", Z_test.shape)
+            
+            # Convert to float32
+            Z_test = Z_test.astype(np.float32)
+            
+            # Convert to PyTorch tensor
+            Z_test_tensor = torch.FloatTensor(Z_test)
+            
+            # ============================================
+            # Save Full Tensor as Output
+            # ============================================
+            logger.info("Saving full tensor output...")
+            
+            tensor_values_path = save_tensor_output(
+                Z_test_tensor,
+                args.tensor_values,
+                "tensor_values"
+            )
+            
+            logger.info("✓ Saved full tensor: %s", tensor_values_path)
+            
+            # ============================================
+            # STEP 1: Split Data into Train/Val/Test
+            # ============================================
+            logger.info("Splitting data with test_size=%s, val_split=%s", 
+                       args.test_size, args.val_split)
+            
+            # First split: separate out test set
+            Z_train_val, Z_test_split = train_test_split(
+                Z_test, test_size=args.test_size, random_state=args.random_state
+            )
+            
+            # Second split: split train_val into train and val
+            Z_train, Z_val = train_test_split(
+                Z_train_val, test_size=args.val_split, random_state=args.random_state
+            )
+            
+            logger.info("Split sizes:")
+            logger.info("  Train: %s", Z_train.shape)
+            logger.info("  Val: %s", Z_val.shape)
+            logger.info("  Test: %s", Z_test_split.shape)
+            
+            # ============================================
+            # STEP 2: Convert to PyTorch Tensors
+            # ============================================
+            logger.info("Converting splits to PyTorch tensors...")
+            
+            Z_train_tensor = torch.FloatTensor(Z_train)
+            Z_val_tensor = torch.FloatTensor(Z_val)
+            Z_test_split_tensor = torch.FloatTensor(Z_test_split)
+            
+            logger.info("✓ Converted to PyTorch tensors")
+            
+            # ============================================
+            # STEP 3: Create PyTorch Datasets
+            # ============================================
+            logger.info("Creating PyTorch TensorDatasets...")
+            
+            train_dataset = TensorDataset(Z_train_tensor)
+            val_dataset = TensorDataset(Z_val_tensor)
+            test_dataset = TensorDataset(Z_test_split_tensor)
+            
+            # ============================================
+            # STEP 4: Create DataLoaders
+            # ============================================
+            logger.info("Creating DataLoaders with batch_size=%s, num_workers=%s", 
+                       args.batch_size, args.num_workers)
+            
+            # Training DataLoader with shuffling
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=args.batch_size,
+                shuffle=True,
+                num_workers=args.num_workers,
+                pin_memory=True,
+                drop_last=False
+            )
+            
+            # Validation DataLoader (no shuffling)
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.num_workers,
+                pin_memory=True,
+                drop_last=False
+            )
+            
+            # Test DataLoader (no shuffling)
+            test_loader = DataLoader(
+                test_dataset,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.num_workers,
+                pin_memory=True,
+                drop_last=False
+            )
+            
+            logger.info("✓ Created DataLoaders")
+            logger.info("  Train batches: %d", len(train_loader))
+            logger.info("  Val batches: %d", len(val_loader))
+            logger.info("  Test batches: %d", len(test_loader))
+            
+            # ============================================
+            # Save Split Datasets
+            # ============================================
+            logger.info("Saving PyTorch datasets...")
+            
+            train_path = save_pytorch_dataset(
+                Z_train_tensor, 
+                args.train_dataset, 
+                "train_dataset"
+            )
+            val_path = save_pytorch_dataset(
+                Z_val_tensor, 
+                args.val_dataset, 
+                "val_dataset"
+            )
+            test_path = save_pytorch_dataset(
+                Z_test_split_tensor, 
+                args.test_dataset, 
+                "test_dataset"
+            )
+            
+            logger.info("All datasets saved successfully!")
+            logger.info("  Full tensor: %s", tensor_values_path)
+            logger.info("  Train: %s", train_path)
+            logger.info("  Val: %s", val_path)
+            logger.info("  Test: %s", test_path)
+            
+        except Exception as e:
+            logger.exception("Fatal error in dataset processing: %s", str(e))
+            sys.exit(1)
+
+    args:
+      - --z_test_cdn
+      - {inputValue: z_test_cdn}
+      - --bearer_token
+      - {inputPath: bearer_token}
+      - --test_size
+      - {inputValue: test_size}
+      - --val_split
+      - {inputValue: val_split}
+      - --random_state
+      - {inputValue: random_state}
+      - --batch_size
+      - {inputValue: batch_size}
+      - --num_workers
+      - {inputValue: num_workers}
+      - --tensor_values
+      - {outputPath: tensor_values}
+      - --train_dataset
+      - {outputPath: train_dataset}
+      - --val_dataset
+      - {outputPath: val_dataset}
+      - --test_dataset
+      - {outputPath: test_dataset}
