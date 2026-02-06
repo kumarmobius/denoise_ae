@@ -7,7 +7,7 @@ inputs:
   - {name: dropout, type: Float, optional: true, default: "0.2"}
   - {name: weight_init_method, type: String, optional: true, default: "xavier_uniform"}
   - {name: activation_function, type: String, optional: true, default: "relu"}
-  - {name: use_batch_norm, type: Boolean, optional: true, default: "True"}
+  - {name: use_batch_norm, type: String, optional: true, default: "true"}
   - {name: optimizer_type, type: String, optional: true, default: "adam"}
   - {name: learning_rate, type: Float, optional: true, default: "0.001"}
   - {name: weight_decay, type: Float, optional: true, default: "0.00001"}
@@ -50,7 +50,7 @@ implementation:
         parser.add_argument('--dropout', type=float, default=0.2)
         parser.add_argument('--weight_init_method', type=str, default='xavier_uniform')
         parser.add_argument('--activation_function', type=str, default='relu')
-        parser.add_argument('--use_batch_norm', type=lambda x: x.lower() == 'true', default=True)
+        parser.add_argument('--use_batch_norm', type=lambda x: x.lower() == 'true', default="true")
         parser.add_argument('--optimizer_type', type=str, default='adam')
         parser.add_argument('--learning_rate', type=float, default=1e-3)
         parser.add_argument('--weight_decay', type=float, default=1e-5)
