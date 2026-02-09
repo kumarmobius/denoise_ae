@@ -20,7 +20,7 @@ outputs:
   - {name: training_history, type: Data}
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:vtest4
+    image: kushagra4761/nesy-factory-gpu:t2.6v4
     command:
       - python3
       - -u
