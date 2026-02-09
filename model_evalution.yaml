@@ -1,4 +1,4 @@
-name: Evaluate Denoising Autoencoder Model V2
+name: Evaluate Denoising Autoencoder Model V2.1
 inputs:
   - {name: trained_model, type: Data}
   - {name: test_dataset, type: Data}
@@ -51,7 +51,11 @@ implementation:
         parser.add_argument('--reconstruction_samples', required=True)
         parser.add_argument('--schema_json', required=True)
         args = parser.parse_args()
-        
+
+        def ensure_dir_for(p):
+            d=os.path.dirname(p)
+            if d and not os.path.exists(d):
+                os.makedirs(d, exist_ok=True)
         def set_seed(seed):
             random.seed(seed)
             np.random.seed(seed)
@@ -356,9 +360,10 @@ implementation:
                 'mse': float(metrics.get('mse', 0.0) * 100),
                 'rmse': float(metrics.get('rmse', 0.0) * 100)
             }
-            schema_json_str = json.dumps(schema_data)
-            with open(args.schema_json, 'w') as f:
-                f.write(schema_json_str)
+            ensure_dir_for(args.schema_json)
+            with open(args.schema_json, "w") as f:
+              json.dump(schema_data, f, indent=2)
+
             logger.info(f"✓ Schema JSON saved to: {args.schema_json}")
             logger.info(f"  Timestamp: {current_timestamp}")
             logger.info(f"  R² Score (×100): {schema_data['r2_score']:.2f}")
