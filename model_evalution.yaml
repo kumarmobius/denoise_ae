@@ -1,4 +1,4 @@
-name: Evaluate Denoising Autoencoder Model V1.4
+name: Evaluate Denoising Autoencoder Model V1.5
 inputs:
   - {name: trained_model, type: Data}
   - {name: test_dataset, type: Data}
@@ -381,11 +381,12 @@ implementation:
             # ========================================
             # Save Schema JSON
             # ========================================
+            # ========================================
+            # Save Schema JSON
+            # ========================================
             logger.info("="*60)
             logger.info("Saving Schema JSON")
             logger.info("="*60)
-            
-            os.makedirs(args.schema_json, exist_ok=True)
             
             # Get current epoch timestamp
             current_timestamp = int(time.time())
@@ -398,23 +399,16 @@ implementation:
                 'rmse': float(metrics.get('rmse', 0.0) * 100)
             }
             
-            schema_path = os.path.join(args.schema_json, 'schema.json')
-            with open(schema_path, 'w') as f:
+            # Write JSON string directly to the output file
+            with open(args.schema_json, 'w') as f:
                 json.dump(schema_data, f, indent=2)
-            logger.info(f"✓ Schema JSON saved to: {schema_path}")
+            
+            logger.info(f"✓ Schema JSON saved to: {args.schema_json}")
             logger.info(f"  Timestamp: {current_timestamp}")
             logger.info(f"  R² Score (×100): {schema_data['r2_score']:.2f}")
             logger.info(f"  MAE (×100): {schema_data['mae']:.2f}")
             logger.info(f"  MSE (×100): {schema_data['mse']:.2f}")
             logger.info(f"  RMSE (×100): {schema_data['rmse']:.2f}")
-            
-            # Save metadata
-            with open(args.schema_json + ".meta.json", "w") as f:
-                json.dump({
-                    "schema_path": schema_path,
-                    "timestamp": current_timestamp
-                }, f, indent=2)
-            
             # ========================================
             # Save Evaluation Results
             # ========================================
