@@ -1,4 +1,4 @@
-name: Evaluate Denoising Autoencoder Model V1.7
+name: Evaluate Denoising Autoencoder Model V1.8
 inputs:
   - {name: trained_model, type: Data}
   - {name: test_dataset, type: Data}
@@ -35,11 +35,9 @@ implementation:
         from torch.utils.data import DataLoader, TensorDataset
         from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
         
-        # Setup logging
         logging.basicConfig(stream=sys.stdout, level=logging.INFO)
         logger = logging.getLogger("model_evaluator")
         
-        # Parse arguments
         parser = argparse.ArgumentParser()
         parser.add_argument('--trained_model', required=True)
         parser.add_argument('--test_dataset', required=True)
@@ -54,9 +52,6 @@ implementation:
         parser.add_argument('--schema_json', required=True)
         args = parser.parse_args()
         
-        # ========================================
-        # Set Random Seeds
-        # ========================================
         def set_seed(seed):
             random.seed(seed)
             np.random.seed(seed)
@@ -67,9 +62,6 @@ implementation:
             torch.backends.cudnn.benchmark = False
             logger.info(f"✓ Random seed set to: {seed}")
         
-        # ========================================
-        # Model Definition
-        # ========================================
         def get_activation(activation_name):
             activations = {
                 'relu': nn.ReLU(),
@@ -86,45 +78,35 @@ implementation:
             return activations.get(activation_name.lower(), nn.ReLU())
         
         class DenoisingAutoencoder(nn.Module):
-            def __init__(self, input_dim=128, hidden_dims=[96, 64], latent_dim=64, 
-                         dropout=0.2, activation='relu', use_batch_norm=True):
+            def __init__(self, input_dim=128, hidden_dims=[96, 64], latent_dim=64, dropout=0.2, activation='relu', use_batch_norm=True):
                 super(DenoisingAutoencoder, self).__init__()
-                
                 self.input_dim = input_dim
                 self.latent_dim = latent_dim
                 self.use_batch_norm = use_batch_norm
-                
-                # Encoder layers
                 encoder_layers = []
                 encoder_layers.append(nn.Linear(input_dim, hidden_dims[0]))
                 if use_batch_norm:
                     encoder_layers.append(nn.BatchNorm1d(hidden_dims[0]))
                 encoder_layers.append(get_activation(activation))
                 encoder_layers.append(nn.Dropout(dropout))
-                
                 encoder_layers.append(nn.Linear(hidden_dims[0], hidden_dims[1]))
                 if use_batch_norm:
                     encoder_layers.append(nn.BatchNorm1d(hidden_dims[1]))
                 encoder_layers.append(get_activation(activation))
                 encoder_layers.append(nn.Dropout(dropout))
-                
                 encoder_layers.append(nn.Linear(hidden_dims[1], latent_dim))
                 self.encoder = nn.Sequential(*encoder_layers)
-                
-                # Decoder layers
                 decoder_layers = []
                 decoder_layers.append(nn.Linear(latent_dim, hidden_dims[1]))
                 if use_batch_norm:
                     decoder_layers.append(nn.BatchNorm1d(hidden_dims[1]))
                 decoder_layers.append(get_activation(activation))
                 decoder_layers.append(nn.Dropout(dropout))
-                
                 decoder_layers.append(nn.Linear(hidden_dims[1], hidden_dims[0]))
                 if use_batch_norm:
                     decoder_layers.append(nn.BatchNorm1d(hidden_dims[0]))
                 decoder_layers.append(get_activation(activation))
                 decoder_layers.append(nn.Dropout(dropout))
-                
                 decoder_layers.append(nn.Linear(hidden_dims[0], input_dim))
                 self.decoder = nn.Sequential(*decoder_layers)
             
@@ -139,9 +121,6 @@ implementation:
             def decode(self, z):
                 return self.decoder(z)
         
-        # ========================================
-        # Noise Functions
-        # ========================================
         def add_noise_to_latent(latent_vectors, noise_type='gaussian', noise_factor=0.3):
             if noise_type == 'gaussian':
                 noise = torch.randn_like(latent_vectors) * noise_factor
@@ -162,25 +141,19 @@ implementation:
                 raise ValueError(f"Unknown noise type: {noise_type}")
             return noisy
         
-        # ========================================
-        # Evaluation Metrics
-        # ========================================
         def compute_reconstruction_metrics(original, reconstructed):
             original_np = original.cpu().numpy()
             reconstructed_np = reconstructed.cpu().numpy()
-            
             metrics = {}
             metrics['mse'] = mean_squared_error(original_np.flatten(), reconstructed_np.flatten())
             metrics['rmse'] = np.sqrt(metrics['mse'])
             metrics['mae'] = mean_absolute_error(original_np.flatten(), reconstructed_np.flatten())
             metrics['r2_score'] = r2_score(original_np.flatten(), reconstructed_np.flatten())
-            
             per_sample_mse = np.mean((original_np - reconstructed_np) ** 2, axis=1)
             metrics['mean_per_sample_mse'] = float(np.mean(per_sample_mse))
             metrics['std_per_sample_mse'] = float(np.std(per_sample_mse))
             metrics['min_per_sample_mse'] = float(np.min(per_sample_mse))
             metrics['max_per_sample_mse'] = float(np.max(per_sample_mse))
-            
             from sklearn.metrics.pairwise import cosine_similarity
             cos_sim = []
             for i in range(len(original_np)):
@@ -188,27 +161,20 @@ implementation:
                 cos_sim.append(sim)
             metrics['mean_cosine_similarity'] = float(np.mean(cos_sim))
             metrics['std_cosine_similarity'] = float(np.std(cos_sim))
-            
             signal_power = np.mean(original_np ** 2)
             noise_power = np.mean((original_np - reconstructed_np) ** 2)
             if noise_power > 0:
                 metrics['snr_db'] = float(10 * np.log10(signal_power / noise_power))
             else:
                 metrics['snr_db'] = float('inf')
-            
             return metrics
         
-        # ========================================
-        # Evaluation Function
-        # ========================================
         def evaluate_model(model, dataloader, device, noise_type='gaussian', noise_factor=0.3):
             model.eval()
-            
             all_originals = []
             all_noisy = []
             all_reconstructed = []
             all_encoded = []
-            
             with torch.no_grad():
                 for batch_idx, (clean_latents,) in enumerate(dataloader):
                     clean_latents = clean_latents.to(device)
@@ -218,23 +184,14 @@ implementation:
                     all_noisy.append(noisy_latents.cpu())
                     all_reconstructed.append(reconstructed.cpu())
                     all_encoded.append(encoded.cpu())
-            
             all_originals = torch.cat(all_originals, dim=0)
             all_noisy = torch.cat(all_noisy, dim=0)
             all_reconstructed = torch.cat(all_reconstructed, dim=0)
             all_encoded = torch.cat(all_encoded, dim=0)
-            
             return all_originals, all_noisy, all_reconstructed, all_encoded
         
         try:
-            # ========================================
-            # Set Random Seed
-            # ========================================
             set_seed(args.seed)
-            
-            # ========================================
-            # Device Detection
-            # ========================================
             if torch.cuda.is_available():
                 device = 'cuda'
                 logger.info(f"✓ GPU detected: {torch.cuda.get_device_name(0)}")
@@ -242,37 +199,27 @@ implementation:
                 device = 'cpu'
                 logger.info("⚠ No GPU detected, using CPU")
             
-            # ========================================
-            # Load Trained Model
-            # ========================================
             logger.info("="*60)
             logger.info("Loading Trained Model")
             logger.info("="*60)
-            
             model_checkpoint_path = os.path.join(args.trained_model, 'best_trained_model.pth')
             if not os.path.exists(model_checkpoint_path):
                 raise FileNotFoundError(f"Trained model not found at: {model_checkpoint_path}")
-            
             checkpoint = torch.load(model_checkpoint_path, map_location=device)
             logger.info(f"✓ Loaded trained model from: {model_checkpoint_path}")
             logger.info(f"  Epoch: {checkpoint['epoch']}")
             logger.info(f"  Training loss: {checkpoint['train_loss']:.6f}")
             logger.info(f"  Validation loss: {checkpoint['val_loss']:.6f}")
-            
-            # Load model configuration from the initialization checkpoint
-            # (We need this to reconstruct the model architecture)
             init_checkpoint_paths = [
                 os.path.join(os.path.dirname(args.trained_model), 'initialized_model.pt'),
                 os.path.join(args.trained_model, 'initialized_model.pt')
             ]
-            
             init_checkpoint = None
             for path in init_checkpoint_paths:
                 if os.path.exists(path):
                     init_checkpoint = torch.load(path, map_location=device)
                     logger.info(f"✓ Loaded initialization config from: {path}")
                     break
-            
             if init_checkpoint is None:
                 logger.warning("Could not find initialization checkpoint. Using default configuration.")
                 model_config = {
@@ -285,16 +232,10 @@ implementation:
                 }
             else:
                 model_config = init_checkpoint['model_config']
-            
             logger.info(f"Model configuration: {model_config}")
-            
-            # ========================================
-            # Reconstruct Model
-            # ========================================
             logger.info("="*60)
             logger.info("Reconstructing Model")
             logger.info("="*60)
-            
             model = DenoisingAutoencoder(
                 input_dim=model_config['input_dim'],
                 hidden_dims=model_config['hidden_dims'],
@@ -303,28 +244,18 @@ implementation:
                 activation=model_config.get('activation_function', 'relu'),
                 use_batch_norm=model_config.get('use_batch_norm', True)
             )
-            
-            # Load trained weights
             model.load_state_dict(checkpoint['model_state_dict'])
             model = model.to(device)
             model.eval()
-            
             logger.info(f"✓ Model reconstructed and loaded to {device}")
             logger.info(f"  Total parameters: {sum(p.numel() for p in model.parameters()):,}")
-            
-            # ========================================
-            # Load Test Dataset
-            # ========================================
             logger.info("="*60)
             logger.info("Loading Test Dataset")
             logger.info("="*60)
-            
             test_dataset_path = os.path.join(args.test_dataset, 'test_dataset.pt')
             test_data = torch.load(test_dataset_path, map_location='cpu')
             test_dataset = TensorDataset(test_data)
             logger.info(f"✓ Loaded test dataset: {test_data.shape}")
-            
-            # Create DataLoader
             test_loader = DataLoader(
                 test_dataset,
                 batch_size=args.batch_size,
@@ -332,20 +263,14 @@ implementation:
                 num_workers=args.num_workers,
                 pin_memory=True if device == 'cuda' else False
             )
-            
             logger.info(f"✓ Test batches: {len(test_loader)}")
             logger.info(f"  Total test samples: {len(test_dataset)}")
-            
-            # ========================================
-            # Evaluate Model
-            # ========================================
             logger.info("="*60)
             logger.info("Evaluating Model on Test Set")
             logger.info("="*60)
             logger.info(f"Noise type: {args.noise_type}")
             logger.info(f"Noise factor: {args.noise_factor}")
             logger.info("="*60)
-            
             all_originals, all_noisy, all_reconstructed, all_encoded = evaluate_model(
                 model=model,
                 dataloader=test_loader,
@@ -353,20 +278,13 @@ implementation:
                 noise_type=args.noise_type,
                 noise_factor=args.noise_factor
             )
-            
             logger.info(f"✓ Evaluation complete")
             logger.info(f"  Processed {len(all_originals)} samples")
-            
-            # ========================================
-            # Compute Metrics
-            # ========================================
             if args.compute_metrics:
                 logger.info("="*60)
                 logger.info("Computing Evaluation Metrics")
                 logger.info("="*60)
-                
                 metrics = compute_reconstruction_metrics(all_originals, all_reconstructed)
-                
                 logger.info("Reconstruction Metrics:")
                 logger.info(f"  MSE: {metrics['mse']:.6f}")
                 logger.info(f"  RMSE: {metrics['rmse']:.6f}")
@@ -378,16 +296,10 @@ implementation:
             else:
                 metrics = {}
             
-            # ========================================
-            # Save Schema JSON
-            # ========================================
             logger.info("="*60)
             logger.info("Saving Schema JSON")
             logger.info("="*60)
-            
-            # Get current epoch timestamp
             current_timestamp = int(time.time())
-            
             schema_data = {
                 'timestamp': current_timestamp,
                 'r2_score': float(metrics.get('r2_score', 0.0) * 100),
@@ -395,27 +307,20 @@ implementation:
                 'mse': float(metrics.get('mse', 0.0) * 100),
                 'rmse': float(metrics.get('rmse', 0.0) * 100)
             }
-            
-            # Write schema JSON directly to the output file path
-            # args.schema_json is now a file path, not a directory
+            schema_json_str = json.dumps(schema_data)
             with open(args.schema_json, 'w') as f:
-                json.dump(schema_data, f, indent=2)
-            
+                f.write(schema_json_str)
             logger.info(f"✓ Schema JSON saved to: {args.schema_json}")
             logger.info(f"  Timestamp: {current_timestamp}")
             logger.info(f"  R² Score (×100): {schema_data['r2_score']:.2f}")
             logger.info(f"  MAE (×100): {schema_data['mae']:.2f}")
             logger.info(f"  MSE (×100): {schema_data['mse']:.2f}")
             logger.info(f"  RMSE (×100): {schema_data['rmse']:.2f}")
-            # ========================================
-            # Save Evaluation Results
-            # ========================================
+            
             logger.info("="*60)
             logger.info("Saving Evaluation Results")
             logger.info("="*60)
-            
             os.makedirs(args.evaluation_results, exist_ok=True)
-            
             evaluation_results = {
                 'metrics': metrics,
                 'test_samples': len(all_originals),
@@ -430,13 +335,10 @@ implementation:
                     'validation_loss': float(checkpoint['val_loss'])
                 }
             }
-            
             results_path = os.path.join(args.evaluation_results, 'evaluation_results.json')
             with open(results_path, 'w') as f:
                 json.dump(evaluation_results, f, indent=2)
             logger.info(f"✓ Evaluation results saved to: {results_path}")
-            
-            # Save metadata
             with open(args.evaluation_results + ".meta.json", "w") as f:
                 json.dump({
                     "results_path": results_path,
@@ -444,16 +346,10 @@ implementation:
                     "mse": metrics.get('mse', 0.0)
                 }, f, indent=2)
             
-            # ========================================
-            # Save Reconstruction Samples
-            # ========================================
             logger.info("="*60)
             logger.info("Saving Reconstruction Samples")
             logger.info("="*60)
-            
             os.makedirs(args.reconstruction_samples, exist_ok=True)
-            
-            # Save sample reconstructions
             num_samples_to_save = min(100, len(all_originals))
             samples_data = {
                 'original': all_originals[:num_samples_to_save],
@@ -461,12 +357,9 @@ implementation:
                 'reconstructed': all_reconstructed[:num_samples_to_save],
                 'encoded': all_encoded[:num_samples_to_save]
             }
-            
             samples_path = os.path.join(args.reconstruction_samples, 'reconstruction_samples.pt')
             torch.save(samples_data, samples_path)
             logger.info(f"✓ Saved {num_samples_to_save} reconstruction samples to: {samples_path}")
-            
-            # Save metadata
             with open(args.reconstruction_samples + ".meta.json", "w") as f:
                 json.dump({
                     "samples_path": samples_path,
@@ -477,7 +370,7 @@ implementation:
             logger.info("✓ Evaluation Complete!")
             logger.info("="*60)
             logger.info(f"Results: {results_path}")
-            logger.info(f"Schema JSON: {schema_path}")
+            logger.info(f"Schema JSON: {args.schema_json}")
             logger.info(f"Test MSE: {metrics.get('mse', 0.0):.6f}")
             logger.info(f"Test RMSE: {metrics.get('rmse', 0.0):.6f}")
             logger.info(f"R² Score: {metrics.get('r2_score', 0.0):.6f}")
