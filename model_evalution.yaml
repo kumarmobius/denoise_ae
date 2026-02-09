@@ -1,4 +1,4 @@
-name: Evaluate Denoising Autoencoder Model V1.2
+name: Evaluate Denoising Autoencoder Model V1.4
 inputs:
   - {name: trained_model, type: Data}
   - {name: test_dataset, type: Data}
@@ -12,6 +12,7 @@ inputs:
 outputs:
   - {name: evaluation_results, type: Data}
   - {name: reconstruction_samples, type: Data}
+  - {name: schema_json, type: Data}
 
 implementation:
   container:
@@ -27,6 +28,7 @@ implementation:
         import json
         import logging
         import random
+        import time
         import numpy as np
         import torch
         import torch.nn as nn
@@ -49,6 +51,7 @@ implementation:
         parser.add_argument('--seed', type=int, default=42)
         parser.add_argument('--evaluation_results', required=True)
         parser.add_argument('--reconstruction_samples', required=True)
+        parser.add_argument('--schema_json', required=True)
         args = parser.parse_args()
         
         # ========================================
@@ -376,6 +379,43 @@ implementation:
                 metrics = {}
             
             # ========================================
+            # Save Schema JSON
+            # ========================================
+            logger.info("="*60)
+            logger.info("Saving Schema JSON")
+            logger.info("="*60)
+            
+            os.makedirs(args.schema_json, exist_ok=True)
+            
+            # Get current epoch timestamp
+            current_timestamp = int(time.time())
+            
+            schema_data = {
+                'timestamp': current_timestamp,
+                'r2_score': float(metrics.get('r2_score', 0.0) * 100),
+                'mae': float(metrics.get('mae', 0.0) * 100),
+                'mse': float(metrics.get('mse', 0.0) * 100),
+                'rmse': float(metrics.get('rmse', 0.0) * 100)
+            }
+            
+            schema_path = os.path.join(args.schema_json, 'schema.json')
+            with open(schema_path, 'w') as f:
+                json.dump(schema_data, f, indent=2)
+            logger.info(f"✓ Schema JSON saved to: {schema_path}")
+            logger.info(f"  Timestamp: {current_timestamp}")
+            logger.info(f"  R² Score (×100): {schema_data['r2_score']:.2f}")
+            logger.info(f"  MAE (×100): {schema_data['mae']:.2f}")
+            logger.info(f"  MSE (×100): {schema_data['mse']:.2f}")
+            logger.info(f"  RMSE (×100): {schema_data['rmse']:.2f}")
+            
+            # Save metadata
+            with open(args.schema_json + ".meta.json", "w") as f:
+                json.dump({
+                    "schema_path": schema_path,
+                    "timestamp": current_timestamp
+                }, f, indent=2)
+            
+            # ========================================
             # Save Evaluation Results
             # ========================================
             logger.info("="*60)
@@ -445,6 +485,7 @@ implementation:
             logger.info("✓ Evaluation Complete!")
             logger.info("="*60)
             logger.info(f"Results: {results_path}")
+            logger.info(f"Schema JSON: {schema_path}")
             logger.info(f"Test MSE: {metrics.get('mse', 0.0):.6f}")
             logger.info(f"Test RMSE: {metrics.get('rmse', 0.0):.6f}")
             logger.info(f"R² Score: {metrics.get('r2_score', 0.0):.6f}")
@@ -474,3 +515,5 @@ implementation:
       - {outputPath: evaluation_results}
       - --reconstruction_samples
       - {outputPath: reconstruction_samples}
+      - --schema_json
+      - {outputPath: schema_json}
