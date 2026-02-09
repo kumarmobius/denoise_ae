@@ -1,4 +1,4 @@
-name: Evaluate Denoising Autoencoder Model V1.1
+name: Evaluate Denoising Autoencoder Model V1.2
 inputs:
   - {name: trained_model, type: Data}
   - {name: test_dataset, type: Data}
@@ -468,13 +468,9 @@ implementation:
       - {inputValue: noise_factor}
       - --compute_metrics
       - {inputValue: compute_metrics}
-      - --num_visualization_samples
-      - {inputValue: num_visualization_samples}
       - --seed
       - {inputValue: seed}
       - --evaluation_results
       - {outputPath: evaluation_results}
-      - --evaluation_plots
-      - {outputPath: evaluation_plots}
       - --reconstruction_samples
       - {outputPath: reconstruction_samples}
