@@ -1,4 +1,4 @@
-name: Evaluate Denoising Autoencoder Model V1.8
+name: Evaluate Denoising Autoencoder Model V2
 inputs:
   - {name: trained_model, type: Data}
   - {name: test_dataset, type: Data}
@@ -297,27 +297,6 @@ implementation:
                 metrics = {}
             
             logger.info("="*60)
-            logger.info("Saving Schema JSON")
-            logger.info("="*60)
-            current_timestamp = int(time.time())
-            schema_data = {
-                'timestamp': current_timestamp,
-                'r2_score': float(metrics.get('r2_score', 0.0) * 100),
-                'mae': float(metrics.get('mae', 0.0) * 100),
-                'mse': float(metrics.get('mse', 0.0) * 100),
-                'rmse': float(metrics.get('rmse', 0.0) * 100)
-            }
-            schema_json_str = json.dumps(schema_data)
-            with open(args.schema_json, 'w') as f:
-                f.write(schema_json_str)
-            logger.info(f"✓ Schema JSON saved to: {args.schema_json}")
-            logger.info(f"  Timestamp: {current_timestamp}")
-            logger.info(f"  R² Score (×100): {schema_data['r2_score']:.2f}")
-            logger.info(f"  MAE (×100): {schema_data['mae']:.2f}")
-            logger.info(f"  MSE (×100): {schema_data['mse']:.2f}")
-            logger.info(f"  RMSE (×100): {schema_data['rmse']:.2f}")
-            
-            logger.info("="*60)
             logger.info("Saving Evaluation Results")
             logger.info("="*60)
             os.makedirs(args.evaluation_results, exist_ok=True)
@@ -365,6 +344,27 @@ implementation:
                     "samples_path": samples_path,
                     "num_samples": num_samples_to_save
                 }, f, indent=2)
+            
+            logger.info("="*60)
+            logger.info("Saving Schema JSON as String")
+            logger.info("="*60)
+            current_timestamp = int(time.time())
+            schema_data = {
+                'timestamp': current_timestamp,
+                'r2_score': float(metrics.get('r2_score', 0.0) * 100),
+                'mae': float(metrics.get('mae', 0.0) * 100),
+                'mse': float(metrics.get('mse', 0.0) * 100),
+                'rmse': float(metrics.get('rmse', 0.0) * 100)
+            }
+            schema_json_str = json.dumps(schema_data)
+            with open(args.schema_json, 'w') as f:
+                f.write(schema_json_str)
+            logger.info(f"✓ Schema JSON saved to: {args.schema_json}")
+            logger.info(f"  Timestamp: {current_timestamp}")
+            logger.info(f"  R² Score (×100): {schema_data['r2_score']:.2f}")
+            logger.info(f"  MAE (×100): {schema_data['mae']:.2f}")
+            logger.info(f"  MSE (×100): {schema_data['mse']:.2f}")
+            logger.info(f"  RMSE (×100): {schema_data['rmse']:.2f}")
             
             logger.info("="*60)
             logger.info("✓ Evaluation Complete!")
