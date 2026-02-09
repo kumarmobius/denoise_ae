@@ -1,0 +1,634 @@
+name: Train Denoising Autoencoder Model v1
+inputs:
+  - {name: model_input, type: Data}
+  - {name: train_dataset, type: Data}
+  - {name: val_dataset, type: Data}
+  - {name: epochs, type: Integer, optional: true, default: "100"}
+  - {name: batch_size, type: Integer, optional: true, default: "32"}
+  - {name: num_workers, type: Integer, optional: true, default: "0"}
+  - {name: noise_type, type: String, optional: true, default: "gaussian"}
+  - {name: noise_factor, type: Float, optional: true, default: "0.3"}
+  - {name: early_stopping_patience, type: Integer, optional: true, default: "10"}
+  - {name: scheduler_type, type: String, optional: true, default: "reduce_on_plateau"}
+  - {name: scheduler_factor, type: Float, optional: true, default: "0.5"}
+  - {name: scheduler_patience, type: Integer, optional: true, default: "5"}
+  - {name: scheduler_min_lr, type: Float, optional: true, default: "0.000001"}
+  - {name: seed, type: Integer, optional: true, default: "42"}
+
+outputs:
+  - {name: trained_model, type: Data}
+  - {name: training_history, type: Data}
+  - {name: training_plots, type: Data}
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:vtest4
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import sys
+        import json
+        import logging
+        import random
+        import numpy as np
+        import torch
+        import torch.nn as nn
+        import torch.optim as optim
+        from torch.utils.data import DataLoader, TensorDataset
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        
+        # Setup logging
+        logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+        logger = logging.getLogger("model_trainer")
+        
+        # Parse arguments
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--model_input', required=True)
+        parser.add_argument('--train_dataset', required=True)
+        parser.add_argument('--val_dataset', required=True)
+        parser.add_argument('--epochs', type=int, default=100)
+        parser.add_argument('--batch_size', type=int, default=32)
+        parser.add_argument('--num_workers', type=int, default=0)
+        parser.add_argument('--noise_type', type=str, default='gaussian')
+        parser.add_argument('--noise_factor', type=float, default=0.3)
+        parser.add_argument('--early_stopping_patience', type=int, default=10)
+        parser.add_argument('--scheduler_type', type=str, default='reduce_on_plateau')
+        parser.add_argument('--scheduler_factor', type=float, default=0.5)
+        parser.add_argument('--scheduler_patience', type=int, default=5)
+        parser.add_argument('--scheduler_min_lr', type=float, default=1e-6)
+        parser.add_argument('--seed', type=int, default=42)
+        parser.add_argument('--trained_model', required=True)
+        parser.add_argument('--training_history', required=True)
+        parser.add_argument('--training_plots', required=True)
+        args = parser.parse_args()
+        
+        # ========================================
+        # Set Random Seeds
+        # ========================================
+        def set_seed(seed):
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            logger.info(f"✓ Random seed set to: {seed}")
+        
+        # ========================================
+        # Model Definition (Same as initialization)
+        # ========================================
+        def get_activation(activation_name):
+            activations = {
+                'relu': nn.ReLU(),
+                'leaky_relu': nn.LeakyReLU(0.2),
+                'elu': nn.ELU(),
+                'selu': nn.SELU(),
+                'gelu': nn.GELU(),
+                'tanh': nn.Tanh(),
+                'sigmoid': nn.Sigmoid(),
+                'swish': nn.SiLU(),
+                'mish': nn.Mish(),
+                'prelu': nn.PReLU(),
+            }
+            return activations.get(activation_name.lower(), nn.ReLU())
+        
+        class DenoisingAutoencoder(nn.Module):
+            def __init__(self, input_dim=128, hidden_dims=[96, 64], latent_dim=64, 
+                         dropout=0.2, activation='relu', use_batch_norm=True):
+                super(DenoisingAutoencoder, self).__init__()
+                
+                self.input_dim = input_dim
+                self.latent_dim = latent_dim
+                self.use_batch_norm = use_batch_norm
+                
+                # Encoder layers
+                encoder_layers = []
+                encoder_layers.append(nn.Linear(input_dim, hidden_dims[0]))
+                if use_batch_norm:
+                    encoder_layers.append(nn.BatchNorm1d(hidden_dims[0]))
+                encoder_layers.append(get_activation(activation))
+                encoder_layers.append(nn.Dropout(dropout))
+                
+                encoder_layers.append(nn.Linear(hidden_dims[0], hidden_dims[1]))
+                if use_batch_norm:
+                    encoder_layers.append(nn.BatchNorm1d(hidden_dims[1]))
+                encoder_layers.append(get_activation(activation))
+                encoder_layers.append(nn.Dropout(dropout))
+                
+                encoder_layers.append(nn.Linear(hidden_dims[1], latent_dim))
+                self.encoder = nn.Sequential(*encoder_layers)
+                
+                # Decoder layers
+                decoder_layers = []
+                decoder_layers.append(nn.Linear(latent_dim, hidden_dims[1]))
+                if use_batch_norm:
+                    decoder_layers.append(nn.BatchNorm1d(hidden_dims[1]))
+                decoder_layers.append(get_activation(activation))
+                decoder_layers.append(nn.Dropout(dropout))
+                
+                decoder_layers.append(nn.Linear(hidden_dims[1], hidden_dims[0]))
+                if use_batch_norm:
+                    decoder_layers.append(nn.BatchNorm1d(hidden_dims[0]))
+                decoder_layers.append(get_activation(activation))
+                decoder_layers.append(nn.Dropout(dropout))
+                
+                decoder_layers.append(nn.Linear(hidden_dims[0], input_dim))
+                self.decoder = nn.Sequential(*decoder_layers)
+            
+            def forward(self, x):
+                encoded = self.encoder(x)
+                decoded = self.decoder(encoded)
+                return decoded, encoded
+            
+            def encode(self, x):
+                return self.encoder(x)
+            
+            def decode(self, z):
+                return self.decoder(z)
+        
+        # ========================================
+        # Noise Functions
+        # ========================================
+        def add_noise_to_latent(latent_vectors, noise_type='gaussian', noise_factor=0.3):
+            if noise_type == 'gaussian':
+                noise = torch.randn_like(latent_vectors) * noise_factor
+                noisy = latent_vectors + noise
+            elif noise_type == 'salt_pepper':
+                noisy = latent_vectors.clone()
+                mask = torch.rand_like(latent_vectors) < noise_factor
+                random_vals = torch.rand(mask.sum(), device=latent_vectors.device)
+                random_vals = random_vals * (latent_vectors.max() - latent_vectors.min()) + latent_vectors.min()
+                noisy[mask] = random_vals
+            elif noise_type == 'dropout':
+                mask = torch.rand_like(latent_vectors) > noise_factor
+                noisy = latent_vectors * mask
+            elif noise_type == 'uniform':
+                noise = (torch.rand_like(latent_vectors) - 0.5) * 2 * noise_factor
+                noisy = latent_vectors + noise
+            else:
+                raise ValueError(f"Unknown noise type: {noise_type}")
+            return noisy
+        
+        # ========================================
+        # Scheduler Setup
+        # ========================================
+        def setup_scheduler(optimizer, scheduler_type='reduce_on_plateau', **kwargs):
+            if scheduler_type is None or scheduler_type.lower() == 'none':
+                return None
+            
+            if scheduler_type.lower() == 'reduce_on_plateau':
+                scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer,
+                    mode='min',
+                    factor=kwargs.get('factor', 0.5),
+                    patience=kwargs.get('patience', 5),
+                    min_lr=kwargs.get('min_lr', 1e-6)
+                )
+            
+            elif scheduler_type.lower() == 'cosine':
+                scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer,
+                    T_max=kwargs.get('T_max', 50),
+                    eta_min=kwargs.get('eta_min', 1e-6)
+                )
+            
+            elif scheduler_type.lower() == 'step':
+                scheduler = optim.lr_scheduler.StepLR(
+                    optimizer,
+                    step_size=kwargs.get('step_size', 30),
+                    gamma=kwargs.get('gamma', 0.1)
+                )
+            
+            elif scheduler_type.lower() == 'exponential':
+                scheduler = optim.lr_scheduler.ExponentialLR(
+                    optimizer,
+                    gamma=kwargs.get('gamma', 0.95)
+                )
+            
+            else:
+                raise ValueError(f"Unknown scheduler: {scheduler_type}")
+            
+            logger.info(f"Scheduler: {scheduler_type}")
+            return scheduler
+        
+        # ========================================
+        # Trainer Class
+        # ========================================
+        class DAETrainer:
+            def __init__(self, model, device='cuda' if torch.cuda.is_available() else 'cpu'):
+                self.model = model.to(device)
+                self.device = device
+                self.train_losses = []
+                self.val_losses = []
+            
+            def train_epoch(self, dataloader, criterion, optimizer, noise_type='gaussian', noise_factor=0.3):
+                self.model.train()
+                epoch_loss = 0.0
+                
+                for batch_idx, (clean_latents,) in enumerate(dataloader):
+                    clean_latents = clean_latents.to(self.device)
+                    
+                    # Add noise to clean latents
+                    noisy_latents = add_noise_to_latent(clean_latents, noise_type, noise_factor)
+                    
+                    # Forward pass
+                    reconstructed, encoded = self.model(noisy_latents)
+                    
+                    # Compute loss
+                    loss = criterion(reconstructed, clean_latents)
+                    
+                    # Backward pass
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    
+                    epoch_loss += loss.item()
+                
+                return epoch_loss / len(dataloader)
+            
+            def validate_epoch(self, dataloader, criterion, noise_type='gaussian', noise_factor=0.3):
+                self.model.eval()
+                epoch_loss = 0.0
+                
+                with torch.no_grad():
+                    for batch_idx, (clean_latents,) in enumerate(dataloader):
+                        clean_latents = clean_latents.to(self.device)
+                        
+                        # Add noise
+                        noisy_latents = add_noise_to_latent(clean_latents, noise_type, noise_factor)
+                        
+                        # Forward pass
+                        reconstructed, _ = self.model(noisy_latents)
+                        
+                        # Compute loss
+                        loss = criterion(reconstructed, clean_latents)
+                        epoch_loss += loss.item()
+                
+                return epoch_loss / len(dataloader)
+            
+            def fit(self, train_loader, val_loader, criterion, optimizer, scheduler=None,
+                    epochs=100, noise_type='gaussian', noise_factor=0.3,
+                    early_stopping_patience=10, save_path='best_dae_model.pth'):
+                
+                best_val_loss = float('inf')
+                patience_counter = 0
+                
+                logger.info(f"Training on device: {self.device}")
+                logger.info(f"Noise type: {noise_type}, Noise factor: {noise_factor}")
+                logger.info("-" * 60)
+                
+                for epoch in range(epochs):
+                    # Train
+                    train_loss = self.train_epoch(train_loader, criterion, optimizer,
+                                                 noise_type, noise_factor)
+                    
+                    # Validate
+                    val_loss = self.validate_epoch(val_loader, criterion,
+                                                  noise_type, noise_factor)
+                    
+                    # Store losses
+                    self.train_losses.append(train_loss)
+                    self.val_losses.append(val_loss)
+                    
+                    # Learning rate scheduling
+                    if scheduler is not None:
+                        if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                            scheduler.step(val_loss)
+                        else:
+                            scheduler.step()
+                    
+                    # Print progress
+                    current_lr = optimizer.param_groups[0]['lr']
+                    logger.info(f"Epoch [{epoch+1}/{epochs}] | "
+                          f"Train Loss: {train_loss:.6f} | "
+                          f"Val Loss: {val_loss:.6f} | "
+                          f"LR: {current_lr:.6f}")
+                    
+                    # Early stopping and model saving
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        patience_counter = 0
+                        # Save best model
+                        torch.save({
+                            'epoch': epoch,
+                            'model_state_dict': self.model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'train_loss': train_loss,
+                            'val_loss': val_loss,
+                        }, save_path)
+                        logger.info(f"✓ Best model saved (Val Loss: {val_loss:.6f})")
+                    else:
+                        patience_counter += 1
+                        if patience_counter >= early_stopping_patience:
+                            logger.info(f"Early stopping triggered after {epoch+1} epochs")
+                            break
+                
+                logger.info("="*60)
+                logger.info(f"Training completed! Best Val Loss: {best_val_loss:.6f}")
+                logger.info("="*60)
+                
+                # Load best model
+                checkpoint = torch.load(save_path)
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+                
+                return self.train_losses, self.val_losses
+        
+        # ========================================
+        # Load Loss Function
+        # ========================================
+        def get_loss_function(loss_type):
+            if loss_type.lower() == 'mse':
+                return nn.MSELoss()
+            elif loss_type.lower() == 'l1':
+                return nn.L1Loss()
+            elif loss_type.lower() == 'smooth_l1':
+                return nn.SmoothL1Loss()
+            elif loss_type.lower() == 'huber':
+                return nn.HuberLoss(delta=1.0)
+            else:
+                logger.warning(f"Unknown loss type: {loss_type}. Using MSE.")
+                return nn.MSELoss()
+        
+        # ========================================
+        # Load Optimizer
+        # ========================================
+        def get_optimizer(model, optimizer_type, lr, weight_decay):
+            if optimizer_type.lower() == 'adam':
+                return optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+            elif optimizer_type.lower() == 'adamw':
+                return optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+            elif optimizer_type.lower() == 'sgd':
+                return optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay, nesterov=True)
+            elif optimizer_type.lower() == 'rmsprop':
+                return optim.RMSprop(model.parameters(), lr=lr, weight_decay=weight_decay, momentum=0.9)
+            else:
+                logger.warning(f"Unknown optimizer: {optimizer_type}. Using Adam.")
+                return optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+        
+        try:
+            # ========================================
+            # Set Random Seed
+            # ========================================
+            set_seed(args.seed)
+            
+            # ========================================
+            # Device Detection
+            # ========================================
+            if torch.cuda.is_available():
+                device = 'cuda'
+                logger.info(f"✓ GPU detected: {torch.cuda.get_device_name(0)}")
+                logger.info(f"  GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+            else:
+                device = 'cpu'
+                logger.info("⚠ No GPU detected, using CPU")
+            
+            # ========================================
+            # Load Model Checkpoint
+            # ========================================
+            logger.info("="*60)
+            logger.info("Loading Model Checkpoint")
+            logger.info("="*60)
+            
+            model_checkpoint_path = os.path.join(args.model_input, 'initialized_model.pt')
+            if not os.path.exists(model_checkpoint_path):
+                raise FileNotFoundError(f"Model checkpoint not found at: {model_checkpoint_path}")
+            
+            checkpoint = torch.load(model_checkpoint_path, map_location=device)
+            logger.info(f"✓ Loaded checkpoint from: {model_checkpoint_path}")
+            
+            # Extract model configuration
+            model_config = checkpoint['model_config']
+            optimizer_config = checkpoint['optimizer_config']
+            loss_type = checkpoint['loss_type']
+            
+            logger.info(f"Model configuration: {model_config}")
+            logger.info(f"Optimizer configuration: {optimizer_config}")
+            logger.info(f"Loss type: {loss_type}")
+            
+            # ========================================
+            # Reconstruct Model
+            # ========================================
+            logger.info("="*60)
+            logger.info("Reconstructing Model")
+            logger.info("="*60)
+            
+            model = DenoisingAutoencoder(
+                input_dim=model_config['input_dim'],
+                hidden_dims=model_config['hidden_dims'],
+                latent_dim=model_config['latent_dim'],
+                dropout=model_config['dropout'],
+                activation=model_config.get('activation_function', 'relu'),
+                use_batch_norm=model_config.get('use_batch_norm', True)
+            )
+            
+            # Load model weights
+            model.load_state_dict(checkpoint['model_state_dict'])
+            model = model.to(device)
+            
+            logger.info(f"✓ Model reconstructed and loaded to {device}")
+            logger.info(f"  Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+            
+            # ========================================
+            # Load Datasets
+            # ========================================
+            logger.info("="*60)
+            logger.info("Loading Datasets")
+            logger.info("="*60)
+            
+            # Load train dataset
+            train_dataset_path = os.path.join(args.train_dataset, 'train_dataset.pt')
+            train_data = torch.load(train_dataset_path, map_location='cpu')
+            train_dataset = TensorDataset(train_data)
+            logger.info(f"✓ Loaded train dataset: {train_data.shape}")
+            
+            # Load validation dataset
+            val_dataset_path = os.path.join(args.val_dataset, 'val_dataset.pt')
+            val_data = torch.load(val_dataset_path, map_location='cpu')
+            val_dataset = TensorDataset(val_data)
+            logger.info(f"✓ Loaded validation dataset: {val_data.shape}")
+            
+            # Create DataLoaders
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=args.batch_size,
+                shuffle=True,
+                num_workers=args.num_workers,
+                pin_memory=True if device == 'cuda' else False
+            )
+            
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.num_workers,
+                pin_memory=True if device == 'cuda' else False
+            )
+            
+            logger.info(f"✓ Train batches: {len(train_loader)}")
+            logger.info(f"✓ Val batches: {len(val_loader)}")
+            
+            # ========================================
+            # Setup Training Components
+            # ========================================
+            logger.info("="*60)
+            logger.info("Setting up Training Components")
+            logger.info("="*60)
+            
+            # Criterion
+            criterion = get_loss_function(loss_type)
+            logger.info(f"✓ Loss function: {loss_type}")
+            
+            # Optimizer
+            optimizer = get_optimizer(
+                model,
+                optimizer_config['type'],
+                optimizer_config['lr'],
+                optimizer_config['weight_decay']
+            )
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            logger.info(f"✓ Optimizer: {optimizer_config['type']}")
+            
+            # Scheduler
+            scheduler = setup_scheduler(
+                optimizer,
+                scheduler_type=args.scheduler_type,
+                factor=args.scheduler_factor,
+                patience=args.scheduler_patience,
+                min_lr=args.scheduler_min_lr,
+                T_max=args.epochs
+            )
+            
+            # ========================================
+            # Train Model
+            # ========================================
+            logger.info("="*60)
+            logger.info("Starting Training")
+            logger.info("="*60)
+            logger.info(f"Epochs: {args.epochs}")
+            logger.info(f"Batch size: {args.batch_size}")
+            logger.info(f"Noise type: {args.noise_type}")
+            logger.info(f"Noise factor: {args.noise_factor}")
+            logger.info(f"Early stopping patience: {args.early_stopping_patience}")
+            logger.info("="*60)
+            
+            # Create trainer
+            trainer = DAETrainer(model, device=device)
+            
+            # Train model
+            os.makedirs(args.trained_model, exist_ok=True)
+            best_model_path = os.path.join(args.trained_model, 'best_trained_model.pth')
+            
+            train_losses, val_losses = trainer.fit(
+                train_loader=train_loader,
+                val_loader=val_loader,
+                criterion=criterion,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epochs=args.epochs,
+                noise_type=args.noise_type,
+                noise_factor=args.noise_factor,
+                early_stopping_patience=args.early_stopping_patience,
+                save_path=best_model_path
+            )
+            
+            # ========================================
+            # Save Training History
+            # ========================================
+            logger.info("="*60)
+            logger.info("Saving Training History")
+            logger.info("="*60)
+            
+            os.makedirs(args.training_history, exist_ok=True)
+            
+            history = {
+                'train_losses': train_losses,
+                'val_losses': val_losses,
+                'epochs_trained': len(train_losses),
+                'best_val_loss': min(val_losses),
+                'final_train_loss': train_losses[-1],
+                'final_val_loss': val_losses[-1],
+                'training_config': {
+                    'epochs': args.epochs,
+                    'batch_size': args.batch_size,
+                    'noise_type': args.noise_type,
+                    'noise_factor': args.noise_factor,
+                    'scheduler_type': args.scheduler_type,
+                    'early_stopping_patience': args.early_stopping_patience
+                }
+            }
+            
+            history_path = os.path.join(args.training_history, 'training_history.json')
+            with open(history_path, 'w') as f:
+                json.dump(history, f, indent=2)
+            logger.info(f"✓ Training history saved to: {history_path}")
+            
+            # Save metadata
+            with open(args.training_history + ".meta.json", "w") as f:
+                json.dump({
+                    "history_path": history_path,
+                    "epochs_trained": len(train_losses),
+                    "best_val_loss": min(val_losses)
+                }, f, indent=2)
+            
+            # Save metadata
+            with open(args.trained_model + ".meta.json", "w") as f:
+                json.dump({
+                    "model_path": best_model_path,
+                    "best_val_loss": min(val_losses),
+                    "epochs_trained": len(train_losses)
+                }, f, indent=2)
+
+            logger.info("="*60)
+            logger.info("✓ Training Complete!")
+            logger.info("="*60)
+            logger.info(f"Best model: {best_model_path}")
+            logger.info(f"Training history: {history_path}")
+            logger.info(f"Best validation loss: {min(val_losses):.6f}")
+            logger.info(f"Epochs trained: {len(train_losses)}")
+            
+        except Exception as e:
+            logger.exception(f"Fatal error during training: {str(e)}")
+            sys.exit(1)
+
+    args:
+      - --model_input
+      - {inputPath: model_input}
+      - --train_dataset
+      - {inputPath: train_dataset}
+      - --val_dataset
+      - {inputPath: val_dataset}
+      - --epochs
+      - {inputValue: epochs}
+      - --batch_size
+      - {inputValue: batch_size}
+      - --num_workers
+      - {inputValue: num_workers}
+      - --noise_type
+      - {inputValue: noise_type}
+      - --noise_factor
+      - {inputValue: noise_factor}
+      - --early_stopping_patience
+      - {inputValue: early_stopping_patience}
+      - --scheduler_type
+      - {inputValue: scheduler_type}
+      - --scheduler_factor
+      - {inputValue: scheduler_factor}
+      - --scheduler_patience
+      - {inputValue: scheduler_patience}
+      - --scheduler_min_lr
+      - {inputValue: scheduler_min_lr}
+      - --seed
+      - {inputValue: seed}
+      - --trained_model
+      - {outputPath: trained_model}
+      - --training_history
+      - {outputPath: training_history}
+      - --training_plots
+      - {outputPath: training_plots}
