@@ -1,4 +1,4 @@
-name: Evaluate Denoising Autoencoder Model V1.6
+name: Evaluate Denoising Autoencoder Model V1.7
 inputs:
   - {name: trained_model, type: Data}
   - {name: test_dataset, type: Data}
@@ -385,9 +385,6 @@ implementation:
             logger.info("Saving Schema JSON")
             logger.info("="*60)
             
-            # Create schema_json directory if it doesn't exist
-            os.makedirs(args.schema_json, exist_ok=True)
-            
             # Get current epoch timestamp
             current_timestamp = int(time.time())
             
@@ -399,18 +396,17 @@ implementation:
                 'rmse': float(metrics.get('rmse', 0.0) * 100)
             }
             
-            # Save to schema.json file inside the directory
-            schema_path = os.path.join(args.schema_json, 'schema.json')
-            with open(schema_path, 'w') as f:
+            # Write schema JSON directly to the output file path
+            # args.schema_json is now a file path, not a directory
+            with open(args.schema_json, 'w') as f:
                 json.dump(schema_data, f, indent=2)
             
-            logger.info(f"✓ Schema JSON saved to: {schema_path}")
+            logger.info(f"✓ Schema JSON saved to: {args.schema_json}")
             logger.info(f"  Timestamp: {current_timestamp}")
             logger.info(f"  R² Score (×100): {schema_data['r2_score']:.2f}")
             logger.info(f"  MAE (×100): {schema_data['mae']:.2f}")
             logger.info(f"  MSE (×100): {schema_data['mse']:.2f}")
             logger.info(f"  RMSE (×100): {schema_data['rmse']:.2f}")
-            
             # ========================================
             # Save Evaluation Results
             # ========================================
