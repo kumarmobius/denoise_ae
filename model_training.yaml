@@ -16,7 +16,7 @@ inputs:
   - {name: seed, type: Integer, optional: true, default: "42"}
 
 outputs:
-  - {name: trained_model, type: Data}
+  - {name: trained_model, type: Model}
   - {name: training_history, type: Data}
 implementation:
   container:
