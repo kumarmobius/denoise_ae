@@ -1,6 +1,6 @@
 name: Evaluate Denoising Autoencoder Model V2.1
 inputs:
-  - {name: trained_model, type: Data}
+  - {name: trained_model, type: Model}
   - {name: test_dataset, type: Data}
   - {name: batch_size, type: Integer, optional: true, default: "32"}
   - {name: num_workers, type: Integer, optional: true, default: "0"}
