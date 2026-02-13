@@ -16,7 +16,7 @@ outputs:
 
 implementation:
   container:
-    image: kushagra4761/nesy-factory-gpu:t2.6v4
+    image: gurpreetgandhi/nesy-factory:v1
     command:
       - python3
       - -u
