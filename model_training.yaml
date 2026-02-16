@@ -1,4 +1,4 @@
-name: Train Denoising Autoencoder Model v3
+name: Train Denoising Autoencoder Model v3.1
 inputs:
   - {name: model_input, type: Data}
   - {name: train_dataset, type: Data}
@@ -98,7 +98,7 @@ implementation:
             return activations.get(activation_name.lower(), nn.ReLU())
 
         # ========================================
-        # ✅ Encoder Block — Dynamic N layers
+        #  Encoder Block — Dynamic N layers
         #    Matches the new init YAML exactly
         # ========================================
         class Encoder(nn.Module):
@@ -128,7 +128,7 @@ implementation:
                 return self.encoder(x)
 
         # ========================================
-        # ✅ Decoder Block — Dynamic N layers
+        #  Decoder Block — Dynamic N layers
         #    Matches the new init YAML exactly
         # ========================================
         class Decoder(nn.Module):
@@ -158,7 +158,7 @@ implementation:
                 return self.decoder(z)
 
         # ========================================
-        # ✅ Full Model — uses encoder_dims + decoder_dims
+        #  Full Model — uses encoder_dims + decoder_dims
         #    No more hidden_dims
         # ========================================
         class DenoisingAutoencoder(nn.Module):
@@ -470,13 +470,39 @@ implementation:
 
             train_dataset_path = os.path.join(args.train_dataset, 'train_dataset.pt')
             train_data = torch.load(train_dataset_path, map_location='cpu')
-            train_dataset = TensorDataset(train_data)
-            logger.info(f"✓ Loaded train dataset: {train_data.shape}")
+            logger.info(f"✓ Loaded train dataset: {train_data.shape}, dtype: {train_data.dtype}")
 
             val_dataset_path = os.path.join(args.val_dataset, 'val_dataset.pt')
             val_data = torch.load(val_dataset_path, map_location='cpu')
+            logger.info(f"✓ Loaded validation dataset: {val_data.shape}, dtype: {val_data.dtype}")
+
+            # ========================================
+            # 🔧 FIX: Handle dtype mismatch (float16 data vs float32 model)
+            # ========================================
+            data_dtype = train_data.dtype
+            model_dtype = next(model.parameters()).dtype
+            
+            logger.info(f"Data dtype: {data_dtype}, Model dtype: {model_dtype}")
+            
+            if data_dtype != model_dtype:
+                logger.warning(f"⚠ Dtype mismatch detected!")
+                
+                if data_dtype == torch.float16:
+                    # Option 1: Convert model to float16 (memory efficient)
+                    logger.info("Converting model to float16...")
+                    model = model.half()
+                    logger.info("✓ Model converted to float16")
+                else:
+                    # Option 2: Convert data to float32 (standard approach)
+                    logger.info("Converting data to float32...")
+                    train_data = train_data.float()
+                    val_data = val_data.float()
+                    logger.info("✓ Data converted to float32")
+            else:
+                logger.info("✓ Dtypes match - no conversion needed")
+
+            train_dataset = TensorDataset(train_data)
             val_dataset = TensorDataset(val_data)
-            logger.info(f"✓ Loaded validation dataset: {val_data.shape}")
 
             train_loader = DataLoader(
                 train_dataset,
