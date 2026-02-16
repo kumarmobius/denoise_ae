@@ -1,8 +1,13 @@
-name: Initialize Denoising Autoencoder Model
+name: Initialize Denoising Autoencoder Model V1
 inputs:
   - {name: input_dim, type: Integer, optional: true, default: "128"}
-  - {name: hidden_dim_1, type: Integer, optional: true, default: "96"}
-  - {name: hidden_dim_2, type: Integer, optional: true, default: "64"}
+
+  # Encoder Layer Configuration
+  - {name: encoder_layers, type: String, optional: true, default: "1024,256,256,256,256", description: "Comma-separated encoder hidden layer sizes e.g. 96,64 or 256,128,64"}
+
+  # Decoder Layer Configuration
+  - {name: decoder_layers, type: String, optional: true, default: "1024,256,1024,256,256", description: "Comma-separated decoder hidden layer sizes e.g. 64,96 or 64,128,256"}
+
   - {name: latent_dim, type: Integer, optional: true, default: "64"}
   - {name: dropout, type: Float, optional: true, default: "0.2"}
   - {name: weight_init_method, type: String, optional: true, default: "xavier_uniform"}
@@ -36,16 +41,19 @@ implementation:
         import torch
         import torch.nn as nn
         import torch.optim as optim
-        
+
         # Setup logging
         logging.basicConfig(stream=sys.stdout, level=logging.INFO)
         logger = logging.getLogger("model_initializer")
-        
+
         # Parse arguments
         parser = argparse.ArgumentParser()
         parser.add_argument('--input_dim', type=int, default=128)
-        parser.add_argument('--hidden_dim_1', type=int, default=96)
-        parser.add_argument('--hidden_dim_2', type=int, default=64)
+        #  Separate encoder and decoder layer configs
+        parser.add_argument('--encoder_layers', type=str, default='96,64',
+                            help="Comma-separated encoder hidden layer sizes e.g. '256,128,64'")
+        parser.add_argument('--decoder_layers', type=str, default='64,96',
+                            help="Comma-separated decoder hidden layer sizes e.g. '64,128,256'")
         parser.add_argument('--latent_dim', type=int, default=64)
         parser.add_argument('--dropout', type=float, default=0.2)
         parser.add_argument('--weight_init_method', type=str, default='xavier_uniform')
@@ -59,7 +67,19 @@ implementation:
         parser.add_argument('--model_output', required=True)
         parser.add_argument('--model_config', required=True)
         args = parser.parse_args()
-        
+
+        # ========================================
+        # Parse layer string -> list of ints
+        # ========================================
+        def parse_layers(layers_str, name="layers"):
+            try:
+                return [int(x.strip()) for x in layers_str.split(",") if x.strip()]
+            except ValueError as e:
+                raise ValueError(
+                    f"Invalid {name} format '{layers_str}'. "
+                    f"Expected comma-separated integers e.g. '256,128,64'. Error: {e}"
+                )
+
         # ========================================
         # Set Random Seeds for Reproducibility
         # ========================================
@@ -72,75 +92,71 @@ implementation:
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
             logger.info(f"✓ Random seed set to: {seed}")
-        
+
         # ========================================
         # Weight Initialization Functions
         # ========================================
         def initialize_weights(model, method='xavier_uniform', activation='relu'):
             logger.info(f"Initializing weights with method: {method.upper()}")
-            
+
             for name, module in model.named_modules():
                 if isinstance(module, nn.Linear):
                     if method == 'xavier_uniform':
                         nn.init.xavier_uniform_(module.weight)
                         if module.bias is not None:
                             nn.init.zeros_(module.bias)
-                    
+
                     elif method == 'xavier_normal':
                         nn.init.xavier_normal_(module.weight)
                         if module.bias is not None:
                             nn.init.zeros_(module.bias)
-                    
+
                     elif method == 'kaiming_uniform':
-                        # He initialization for ReLU
                         nonlinearity = 'relu' if activation.lower() == 'relu' else 'leaky_relu'
                         nn.init.kaiming_uniform_(module.weight, mode='fan_in', nonlinearity=nonlinearity)
                         if module.bias is not None:
                             nn.init.zeros_(module.bias)
-                    
+
                     elif method == 'kaiming_normal':
-                        # He initialization for ReLU
                         nonlinearity = 'relu' if activation.lower() == 'relu' else 'leaky_relu'
                         nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity=nonlinearity)
                         if module.bias is not None:
                             nn.init.zeros_(module.bias)
-                    
+
                     elif method == 'orthogonal':
                         nn.init.orthogonal_(module.weight, gain=1.0)
                         if module.bias is not None:
                             nn.init.zeros_(module.bias)
-                    
+
                     elif method == 'normal':
                         nn.init.normal_(module.weight, mean=0.0, std=0.02)
                         if module.bias is not None:
                             nn.init.zeros_(module.bias)
-                    
+
                     elif method == 'uniform':
                         nn.init.uniform_(module.weight, a=-0.1, b=0.1)
                         if module.bias is not None:
                             nn.init.zeros_(module.bias)
-                    
+
                     elif method == 'sparse':
                         nn.init.sparse_(module.weight, sparsity=0.1)
                         if module.bias is not None:
                             nn.init.zeros_(module.bias)
-                    
+
                     elif method == 'default':
-                        # PyTorch default initialization (do nothing)
                         pass
-                    
+
                     else:
                         logger.warning(f"Unknown initialization method: {method}. Using default.")
-                
+
                 elif isinstance(module, nn.BatchNorm1d):
-                    # BatchNorm initialization
                     if module.weight is not None:
                         nn.init.ones_(module.weight)
                     if module.bias is not None:
                         nn.init.zeros_(module.bias)
-            
+
             logger.info("✓ Weight initialization complete")
-        
+
         # ========================================
         # Get Activation Function
         # ========================================
@@ -153,204 +169,184 @@ implementation:
                 'gelu': nn.GELU(),
                 'tanh': nn.Tanh(),
                 'sigmoid': nn.Sigmoid(),
-                'swish': nn.SiLU(),  # Swish is SiLU in PyTorch
+                'swish': nn.SiLU(),
                 'mish': nn.Mish(),
                 'prelu': nn.PReLU(),
             }
-            
             if activation_name.lower() not in activations:
                 logger.warning(f"Unknown activation: {activation_name}. Using ReLU.")
                 return nn.ReLU()
-            
             return activations[activation_name.lower()]
-        
+
         # ========================================
-        # Model Definition
+        # Encoder Block — Dynamic N layers
+        # ========================================
+        class Encoder(nn.Module):
+            def __init__(self, input_dim, encoder_dims, latent_dim,
+                         dropout, activation, use_batch_norm):
+                super(Encoder, self).__init__()
+
+                layers = []
+                prev_dim = input_dim
+
+                logger.info("  Building Encoder:")
+                logger.info(f"    Input : {input_dim}")
+
+                for idx, units in enumerate(encoder_dims):
+                    layers.append(nn.Linear(prev_dim, units))
+                    if use_batch_norm:
+                        layers.append(nn.BatchNorm1d(units))
+                    layers.append(get_activation(activation))
+                    layers.append(nn.Dropout(dropout))
+                    logger.info(f"    Layer {idx + 1} : {prev_dim} -> {units}")
+                    prev_dim = units
+
+                # Final projection to latent space
+                layers.append(nn.Linear(prev_dim, latent_dim))
+                logger.info(f"    Latent  : {prev_dim} -> {latent_dim}")
+
+                self.encoder = nn.Sequential(*layers)
+
+            def forward(self, x):
+                return self.encoder(x)
+
+        # ========================================
+        # Decoder Block — Dynamic N layers
+        # ========================================
+        class Decoder(nn.Module):
+            def __init__(self, latent_dim, decoder_dims, input_dim,
+                         dropout, activation, use_batch_norm):
+                super(Decoder, self).__init__()
+
+                layers = []
+                prev_dim = latent_dim
+
+                logger.info("  Building Decoder:")
+                logger.info(f"    Input : {latent_dim} (latent)")
+
+                for idx, units in enumerate(decoder_dims):
+                    layers.append(nn.Linear(prev_dim, units))
+                    if use_batch_norm:
+                        layers.append(nn.BatchNorm1d(units))
+                    layers.append(get_activation(activation))
+                    layers.append(nn.Dropout(dropout))
+                    logger.info(f"    Layer {idx + 1} : {prev_dim} -> {units}")
+                    prev_dim = units
+
+                # Final reconstruction back to input_dim
+                layers.append(nn.Linear(prev_dim, input_dim))
+                logger.info(f"    Output  : {prev_dim} -> {input_dim} (reconstructed)")
+
+                self.decoder = nn.Sequential(*layers)
+
+            def forward(self, z):
+                return self.decoder(z)
+
+        # ========================================
+        # Full Denoising Autoencoder
         # ========================================
         class DenoisingAutoencoder(nn.Module):
-            def __init__(self, input_dim=128, hidden_dims=[96, 64], latent_dim=64, 
-                         dropout=0.2, activation='relu', use_batch_norm=True):
+            def __init__(self, input_dim, encoder_dims, decoder_dims, latent_dim,
+                         dropout, activation, use_batch_norm):
                 super(DenoisingAutoencoder, self).__init__()
-                
+
                 self.input_dim = input_dim
                 self.latent_dim = latent_dim
-                self.use_batch_norm = use_batch_norm
-                
-                # Get activation function
-                act_fn = get_activation(activation)
-                
-                # Encoder layers
-                encoder_layers = []
-                
-                # First encoder layer
-                encoder_layers.append(nn.Linear(input_dim, hidden_dims[0]))
-                if use_batch_norm:
-                    encoder_layers.append(nn.BatchNorm1d(hidden_dims[0]))
-                encoder_layers.append(get_activation(activation))
-                encoder_layers.append(nn.Dropout(dropout))
-                
-                # Second encoder layer
-                encoder_layers.append(nn.Linear(hidden_dims[0], hidden_dims[1]))
-                if use_batch_norm:
-                    encoder_layers.append(nn.BatchNorm1d(hidden_dims[1]))
-                encoder_layers.append(get_activation(activation))
-                encoder_layers.append(nn.Dropout(dropout))
-                
-                # Latent layer
-                encoder_layers.append(nn.Linear(hidden_dims[1], latent_dim))
-                
-                self.encoder = nn.Sequential(*encoder_layers)
-                
-                # Decoder layers (mirror of encoder)
-                decoder_layers = []
-                
-                # First decoder layer
-                decoder_layers.append(nn.Linear(latent_dim, hidden_dims[1]))
-                if use_batch_norm:
-                    decoder_layers.append(nn.BatchNorm1d(hidden_dims[1]))
-                decoder_layers.append(get_activation(activation))
-                decoder_layers.append(nn.Dropout(dropout))
-                
-                # Second decoder layer
-                decoder_layers.append(nn.Linear(hidden_dims[1], hidden_dims[0]))
-                if use_batch_norm:
-                    decoder_layers.append(nn.BatchNorm1d(hidden_dims[0]))
-                decoder_layers.append(get_activation(activation))
-                decoder_layers.append(nn.Dropout(dropout))
-                
-                # Output layer
-                decoder_layers.append(nn.Linear(hidden_dims[0], input_dim))
-                
-                self.decoder = nn.Sequential(*decoder_layers)
-            
+
+                self.encoder = Encoder(
+                    input_dim=input_dim,
+                    encoder_dims=encoder_dims,
+                    latent_dim=latent_dim,
+                    dropout=dropout,
+                    activation=activation,
+                    use_batch_norm=use_batch_norm
+                )
+
+                self.decoder = Decoder(
+                    latent_dim=latent_dim,
+                    decoder_dims=decoder_dims,
+                    input_dim=input_dim,
+                    dropout=dropout,
+                    activation=activation,
+                    use_batch_norm=use_batch_norm
+                )
+
             def forward(self, x):
                 encoded = self.encoder(x)
                 decoded = self.decoder(encoded)
                 return decoded, encoded
-            
+
             def encode(self, x):
                 return self.encoder(x)
-            
+
             def decode(self, z):
                 return self.decoder(z)
-        
+
         # ========================================
-        # Setup Functions
+        # Setup Optimizer and Loss
         # ========================================
-        def setup_optimizer_and_loss(model, optimizer_type='adam', lr=1e-3, 
-                                    weight_decay=1e-5, loss_type='mse'):
-            
-            # ---- Optimizer Selection ----
+        def setup_optimizer_and_loss(model, optimizer_type='adam', lr=1e-3,
+                                     weight_decay=1e-5, loss_type='mse'):
             if optimizer_type.lower() == 'adam':
-                optimizer = optim.Adam(
-                    model.parameters(),
-                    lr=lr,
-                    betas=(0.9, 0.999),
-                    eps=1e-8,
-                    weight_decay=weight_decay
-                )
-            
+                optimizer = optim.Adam(model.parameters(), lr=lr,
+                                       betas=(0.9, 0.999), eps=1e-8,
+                                       weight_decay=weight_decay)
             elif optimizer_type.lower() == 'adamw':
-                optimizer = optim.AdamW(
-                    model.parameters(),
-                    lr=lr,
-                    betas=(0.9, 0.999),
-                    eps=1e-8,
-                    weight_decay=weight_decay
-                )
-            
+                optimizer = optim.AdamW(model.parameters(), lr=lr,
+                                        betas=(0.9, 0.999), eps=1e-8,
+                                        weight_decay=weight_decay)
             elif optimizer_type.lower() == 'sgd':
-                optimizer = optim.SGD(
-                    model.parameters(),
-                    lr=lr,
-                    momentum=0.9,
-                    weight_decay=weight_decay,
-                    nesterov=True
-                )
-            
+                optimizer = optim.SGD(model.parameters(), lr=lr,
+                                      momentum=0.9, weight_decay=weight_decay,
+                                      nesterov=True)
             elif optimizer_type.lower() == 'rmsprop':
-                optimizer = optim.RMSprop(
-                    model.parameters(),
-                    lr=lr,
-                    alpha=0.99,
-                    eps=1e-8,
-                    weight_decay=weight_decay,
-                    momentum=0.9
-                )
-            
+                optimizer = optim.RMSprop(model.parameters(), lr=lr,
+                                          alpha=0.99, eps=1e-8,
+                                          weight_decay=weight_decay, momentum=0.9)
             elif optimizer_type.lower() == 'adagrad':
-                optimizer = optim.Adagrad(
-                    model.parameters(),
-                    lr=lr,
-                    lr_decay=0,
-                    weight_decay=weight_decay
-                )
-            
+                optimizer = optim.Adagrad(model.parameters(), lr=lr,
+                                          lr_decay=0, weight_decay=weight_decay)
             elif optimizer_type.lower() == 'adadelta':
-                optimizer = optim.Adadelta(
-                    model.parameters(),
-                    lr=lr,
-                    rho=0.9,
-                    eps=1e-6,
-                    weight_decay=weight_decay
-                )
-            
+                optimizer = optim.Adadelta(model.parameters(), lr=lr,
+                                           rho=0.9, eps=1e-6,
+                                           weight_decay=weight_decay)
             else:
                 raise ValueError(f"Unknown optimizer: {optimizer_type}")
-            
-            # ---- Loss Function Selection ----
+
             if loss_type.lower() == 'mse':
                 criterion = nn.MSELoss()
-            
             elif loss_type.lower() == 'l1':
                 criterion = nn.L1Loss()
-            
             elif loss_type.lower() == 'smooth_l1':
                 criterion = nn.SmoothL1Loss()
-            
             elif loss_type.lower() == 'huber':
                 criterion = nn.HuberLoss(delta=1.0)
-            
             elif loss_type.lower() == 'cosine':
                 criterion = nn.CosineEmbeddingLoss()
-            
             else:
                 raise ValueError(f"Unknown loss type: {loss_type}")
-            
-            logger.info(f"Optimizer: {optimizer_type.upper()}")
-            logger.info(f"Learning rate: {lr}")
-            logger.info(f"Weight decay: {weight_decay}")
-            logger.info(f"Loss function: {loss_type.upper()}")
-            
+
+            logger.info(f"Optimizer     : {optimizer_type.upper()}")
+            logger.info(f"Learning rate : {lr}")
+            logger.info(f"Weight decay  : {weight_decay}")
+            logger.info(f"Loss function : {loss_type.upper()}")
             return optimizer, criterion
-        
-        def initialize_model(input_dim=128, hidden_dims=[96, 64], latent_dim=64, 
-                             dropout=0.2, activation='relu', use_batch_norm=True, device='cuda'):
-            model = DenoisingAutoencoder(
-                input_dim=input_dim,
-                hidden_dims=hidden_dims,
-                latent_dim=latent_dim,
-                dropout=dropout,
-                activation=activation,
-                use_batch_norm=use_batch_norm
-            )
-            
-            model = model.to(device)
-            
-            # Print model architecture
-            logger.info("Model Architecture:")
-            logger.info(str(model))
-            logger.info(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
-            logger.info(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-            
-            return model
-        
+
         try:
+            # ========================================
+            # Parse encoder and decoder layer strings
+            # ========================================
+            encoder_dims = parse_layers(args.encoder_layers, name="encoder_layers")
+            decoder_dims = parse_layers(args.decoder_layers, name="decoder_layers")
+
+            logger.info(f"Encoder layers parsed : {encoder_dims}  ({len(encoder_dims)} layers)")
+            logger.info(f"Decoder layers parsed : {decoder_dims}  ({len(decoder_dims)} layers)")
+
             # ========================================
             # Set Random Seed
             # ========================================
             set_seed(args.seed)
-            
+
             # ========================================
             # Device Detection
             # ========================================
@@ -362,50 +358,52 @@ implementation:
             else:
                 device = 'cpu'
                 logger.info("⚠ No GPU detected, using CPU")
-            
             logger.info(f"Using device: {device}")
-            
+
             # ========================================
             # Initialize Model
             # ========================================
-            hidden_dims = [args.hidden_dim_1, args.hidden_dim_2]
-            
-            logger.info("="*50)
+            logger.info("=" * 55)
             logger.info("Initializing Denoising Autoencoder")
-            logger.info("="*50)
-            logger.info(f"Input dimension: {args.input_dim}")
-            logger.info(f"Hidden dimensions: {hidden_dims}")
-            logger.info(f"Latent dimension: {args.latent_dim}")
-            logger.info(f"Dropout: {args.dropout}")
-            logger.info(f"Activation function: {args.activation_function}")
-            logger.info(f"Batch normalization: {args.use_batch_norm}")
-            
-            model = initialize_model(
+            logger.info("=" * 55)
+            logger.info(f"Input dimension  : {args.input_dim}")
+            logger.info(f"Encoder layers   : {encoder_dims}  ({len(encoder_dims)} layers)")
+            logger.info(f"Latent dimension : {args.latent_dim}")
+            logger.info(f"Decoder layers   : {decoder_dims}  ({len(decoder_dims)} layers)")
+            logger.info(f"Dropout          : {args.dropout}")
+            logger.info(f"Activation       : {args.activation_function}")
+            logger.info(f"Batch norm       : {args.use_batch_norm}")
+
+            model = DenoisingAutoencoder(
                 input_dim=args.input_dim,
-                hidden_dims=hidden_dims,
+                encoder_dims=encoder_dims,
+                decoder_dims=decoder_dims,
                 latent_dim=args.latent_dim,
                 dropout=args.dropout,
                 activation=args.activation_function,
-                use_batch_norm=args.use_batch_norm,
-                device=device
-            )
-            
+                use_batch_norm=args.use_batch_norm
+            ).to(device)
+
+            logger.info("Model Architecture:")
+            logger.info(str(model))
+            logger.info(f"Total parameters     : {sum(p.numel() for p in model.parameters()):,}")
+            logger.info(f"Trainable parameters : {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+
             # ========================================
             # Apply Weight Initialization
             # ========================================
-            logger.info("="*50)
+            logger.info("=" * 55)
             logger.info("Applying Weight Initialization")
-            logger.info("="*50)
-            
-            initialize_weights(model, method=args.weight_init_method, activation=args.activation_function)
-            
+            logger.info("=" * 55)
+            initialize_weights(model, method=args.weight_init_method,
+                               activation=args.activation_function)
+
             # ========================================
             # Setup Optimizer and Loss
             # ========================================
-            logger.info("="*50)
+            logger.info("=" * 55)
             logger.info("Setting up Optimizer and Loss Function")
-            logger.info("="*50)
-            
+            logger.info("=" * 55)
             optimizer, criterion = setup_optimizer_and_loss(
                 model=model,
                 optimizer_type=args.optimizer_type,
@@ -413,26 +411,27 @@ implementation:
                 weight_decay=args.weight_decay,
                 loss_type=args.loss_type
             )
-            
+
             # ========================================
             # Save Model and Configuration
             # ========================================
-            logger.info("="*50)
+            logger.info("=" * 55)
             logger.info("Saving Model and Configuration")
-            logger.info("="*50)
-            
-            # Create output directories
+            logger.info("=" * 55)
+
             os.makedirs(args.model_output, exist_ok=True)
             os.makedirs(args.model_config, exist_ok=True)
-            
-            # Save model checkpoint
+
             model_path = os.path.join(args.model_output, 'initialized_model.pt')
             checkpoint = {
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'model_config': {
                     'input_dim': args.input_dim,
-                    'hidden_dims': hidden_dims,
+                    'encoder_dims': encoder_dims,
+                    'decoder_dims': decoder_dims,
+                    'num_encoder_layers': len(encoder_dims),
+                    'num_decoder_layers': len(decoder_dims),
                     'latent_dim': args.latent_dim,
                     'dropout': args.dropout,
                     'activation_function': args.activation_function,
@@ -448,11 +447,10 @@ implementation:
                 'device': device,
                 'seed': args.seed
             }
-            
+
             torch.save(checkpoint, model_path)
             logger.info(f"✓ Model saved to: {model_path}")
-            
-            # Save model metadata
+
             with open(args.model_output + ".meta.json", "w") as f:
                 json.dump({
                     "model_path": model_path,
@@ -460,15 +458,17 @@ implementation:
                     "total_parameters": sum(p.numel() for p in model.parameters()),
                     "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad)
                 }, f, indent=2)
-            
-            # Save detailed configuration
+
+            # Save detailed configuration JSON
             config_path = os.path.join(args.model_config, 'model_config.json')
             config = {
                 'architecture': {
                     'input_dim': args.input_dim,
-                    'hidden_dim_1': args.hidden_dim_1,
-                    'hidden_dim_2': args.hidden_dim_2,
+                    'encoder_dims': encoder_dims,
+                    'num_encoder_layers': len(encoder_dims),
                     'latent_dim': args.latent_dim,
+                    'decoder_dims': decoder_dims,
+                    'num_decoder_layers': len(decoder_dims),
                     'dropout': args.dropout,
                     'activation_function': args.activation_function,
                     'use_batch_norm': args.use_batch_norm,
@@ -499,28 +499,28 @@ implementation:
                     'pytorch_version': torch.__version__
                 }
             }
-            
+
             with open(config_path, 'w') as f:
                 json.dump(config, f, indent=2)
             logger.info(f"✓ Configuration saved to: {config_path}")
-            
-            # Save config metadata
+
             with open(args.model_config + ".meta.json", "w") as f:
-                json.dump({
-                    "config_path": config_path
-                }, f, indent=2)
-            
-            logger.info("="*50)
+                json.dump({"config_path": config_path}, f, indent=2)
+
+            logger.info("=" * 55)
             logger.info("✓ Model Initialization Complete!")
-            logger.info("="*50)
-            logger.info(f"Model checkpoint: {model_path}")
-            logger.info(f"Configuration: {config_path}")
-            logger.info(f"Device: {device}")
+            logger.info("=" * 55)
+            logger.info(f"Model checkpoint     : {model_path}")
+            logger.info(f"Configuration        : {config_path}")
+            logger.info(f"Device               : {device}")
+            logger.info(f"Encoder layers       : {encoder_dims}  ({len(encoder_dims)} layers)")
+            logger.info(f"Latent dimension     : {args.latent_dim}")
+            logger.info(f"Decoder layers       : {decoder_dims}  ({len(decoder_dims)} layers)")
             logger.info(f"Weight initialization: {args.weight_init_method}")
-            logger.info(f"Activation function: {args.activation_function}")
-            logger.info(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
-            logger.info(f"Random seed: {args.seed}")
-            
+            logger.info(f"Activation function  : {args.activation_function}")
+            logger.info(f"Total parameters     : {sum(p.numel() for p in model.parameters()):,}")
+            logger.info(f"Random seed          : {args.seed}")
+
         except Exception as e:
             logger.exception(f"Fatal error during model initialization: {str(e)}")
             sys.exit(1)
@@ -528,10 +528,11 @@ implementation:
     args:
       - --input_dim
       - {inputValue: input_dim}
-      - --hidden_dim_1
-      - {inputValue: hidden_dim_1}
-      - --hidden_dim_2
-      - {inputValue: hidden_dim_2}
+      # ✅ Separate encoder and decoder layer inputs
+      - --encoder_layers
+      - {inputValue: encoder_layers}
+      - --decoder_layers
+      - {inputValue: decoder_layers}
       - --latent_dim
       - {inputValue: latent_dim}
       - --dropout
