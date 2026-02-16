@@ -1,4 +1,4 @@
-name: Dataset downloader and splitter
+name: Dataset downloader and splitter V1.1
 inputs:
   - {name: z_test_cdn, type: String, optional: false}
   - {name: bearer_token, type: string, optional: true, default: ""}
@@ -150,6 +150,9 @@ implementation:
             # If all strategies failed, raise the last error
             logger.error("All loading strategies failed!")
             raise RuntimeError(f"Could not load file with any supported format. Last error: {last_error}")
+            
+        def get_tensor_size_mb(tensor):
+            return tensor.element_size() * tensor.nelement() / (1024 * 1024)
 
         def save_tensor_output(tensor, output_path, data_name):
             os.makedirs(output_path, exist_ok=True)
@@ -198,11 +201,15 @@ implementation:
             
             logger.info("Z_test shape: %s", Z_test.shape)
             
-            # Convert to float32
-            Z_test = Z_test.astype(np.float32)
+            # Convert to float16
+            Z_test = Z_test.astype(np.float16)
+
+
             
             # Convert to PyTorch tensor
             Z_test_tensor = torch.FloatTensor(Z_test)
+            logger.info("Split Tensor Memory Usage:")
+            logger.info("  Train X: %.2f MB", get_tensor_size_mb(Z_test_tensor))
             
             # ============================================
             # Save Full Tensor as Output
