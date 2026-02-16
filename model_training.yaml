@@ -1,4 +1,4 @@
-name: Train Denoising Autoencoder Model v3.2
+name: Train Denoising Autoencoder Model v3.3
 inputs:
   - {name: model_input, type: Data}
   - {name: train_dataset, type: Data}
@@ -42,11 +42,9 @@ implementation:
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
 
-        # Setup logging
         logging.basicConfig(stream=sys.stdout, level=logging.INFO)
         logger = logging.getLogger("model_trainer")
 
-        # Parse arguments
         parser = argparse.ArgumentParser()
         parser.add_argument('--model_input', required=True)
         parser.add_argument('--train_dataset', required=True)
@@ -66,9 +64,6 @@ implementation:
         parser.add_argument('--training_history', required=True)
         args = parser.parse_args()
 
-        # ========================================
-        # Set Random Seeds
-        # ========================================
         def set_seed(seed):
             random.seed(seed)
             np.random.seed(seed)
@@ -79,36 +74,21 @@ implementation:
             torch.backends.cudnn.benchmark = False
             logger.info(f"✓ Random seed set to: {seed}")
 
-        # ========================================
-        # Activation Function
-        # ========================================
         def get_activation(activation_name):
             activations = {
-                'relu': nn.ReLU(),
-                'leaky_relu': nn.LeakyReLU(0.2),
-                'elu': nn.ELU(),
-                'selu': nn.SELU(),
-                'gelu': nn.GELU(),
-                'tanh': nn.Tanh(),
-                'sigmoid': nn.Sigmoid(),
-                'swish': nn.SiLU(),
-                'mish': nn.Mish(),
-                'prelu': nn.PReLU(),
+                'relu': nn.ReLU(), 'leaky_relu': nn.LeakyReLU(0.2),
+                'elu': nn.ELU(), 'selu': nn.SELU(), 'gelu': nn.GELU(),
+                'tanh': nn.Tanh(), 'sigmoid': nn.Sigmoid(),
+                'swish': nn.SiLU(), 'mish': nn.Mish(), 'prelu': nn.PReLU(),
             }
             return activations.get(activation_name.lower(), nn.ReLU())
 
-        # ========================================
-        #  Encoder Block — Dynamic N layers
-        #    Matches the new init YAML exactly
-        # ========================================
         class Encoder(nn.Module):
             def __init__(self, input_dim, encoder_dims, latent_dim,
                          dropout, activation, use_batch_norm):
                 super(Encoder, self).__init__()
-
                 layers = []
                 prev_dim = input_dim
-
                 for idx, units in enumerate(encoder_dims):
                     layers.append(nn.Linear(prev_dim, units))
                     if use_batch_norm:
@@ -117,28 +97,19 @@ implementation:
                     layers.append(nn.Dropout(dropout))
                     logger.info(f"    Encoder Layer {idx + 1}: {prev_dim} -> {units}")
                     prev_dim = units
-
-                # Final projection to latent space
                 layers.append(nn.Linear(prev_dim, latent_dim))
                 logger.info(f"    Encoder Latent : {prev_dim} -> {latent_dim}")
-
                 self.encoder = nn.Sequential(*layers)
 
             def forward(self, x):
                 return self.encoder(x)
 
-        # ========================================
-        #  Decoder Block — Dynamic N layers
-        #    Matches the new init YAML exactly
-        # ========================================
         class Decoder(nn.Module):
             def __init__(self, latent_dim, decoder_dims, input_dim,
                          dropout, activation, use_batch_norm):
                 super(Decoder, self).__init__()
-
                 layers = []
                 prev_dim = latent_dim
-
                 for idx, units in enumerate(decoder_dims):
                     layers.append(nn.Linear(prev_dim, units))
                     if use_batch_norm:
@@ -147,168 +118,108 @@ implementation:
                     layers.append(nn.Dropout(dropout))
                     logger.info(f"    Decoder Layer {idx + 1}: {prev_dim} -> {units}")
                     prev_dim = units
-
-                # Final reconstruction back to input_dim
                 layers.append(nn.Linear(prev_dim, input_dim))
                 logger.info(f"    Decoder Output : {prev_dim} -> {input_dim}")
-
                 self.decoder = nn.Sequential(*layers)
 
             def forward(self, z):
                 return self.decoder(z)
 
-        # ========================================
-        #  Full Model — uses encoder_dims + decoder_dims
-        #    No more hidden_dims
-        # ========================================
         class DenoisingAutoencoder(nn.Module):
             def __init__(self, input_dim, encoder_dims, decoder_dims, latent_dim,
                          dropout, activation, use_batch_norm):
                 super(DenoisingAutoencoder, self).__init__()
-
-                self.input_dim = input_dim
+                self.input_dim  = input_dim
                 self.latent_dim = latent_dim
-
-                self.encoder = Encoder(
-                    input_dim=input_dim,
-                    encoder_dims=encoder_dims,
-                    latent_dim=latent_dim,
-                    dropout=dropout,
-                    activation=activation,
-                    use_batch_norm=use_batch_norm
-                )
-
-                self.decoder = Decoder(
-                    latent_dim=latent_dim,
-                    decoder_dims=decoder_dims,
-                    input_dim=input_dim,
-                    dropout=dropout,
-                    activation=activation,
-                    use_batch_norm=use_batch_norm
-                )
+                self.encoder = Encoder(input_dim, encoder_dims, latent_dim,
+                                       dropout, activation, use_batch_norm)
+                self.decoder = Decoder(latent_dim, decoder_dims, input_dim,
+                                       dropout, activation, use_batch_norm)
 
             def forward(self, x):
                 encoded = self.encoder(x)
                 decoded = self.decoder(encoded)
                 return decoded, encoded
 
-            def encode(self, x):
-                return self.encoder(x)
+            def encode(self, x): return self.encoder(x)
+            def decode(self, z): return self.decoder(z)
 
-            def decode(self, z):
-                return self.decoder(z)
-
-        # ========================================
-        # Noise Functions
-        # ========================================
         def add_noise_to_latent(latent_vectors, noise_type='gaussian', noise_factor=0.3):
             if noise_type == 'gaussian':
-                noise = torch.randn_like(latent_vectors) * noise_factor
-                noisy = latent_vectors + noise
+                return latent_vectors + torch.randn_like(latent_vectors) * noise_factor
             elif noise_type == 'salt_pepper':
                 noisy = latent_vectors.clone()
                 mask = torch.rand_like(latent_vectors) < noise_factor
                 random_vals = torch.rand(mask.sum(), device=latent_vectors.device)
                 random_vals = random_vals * (latent_vectors.max() - latent_vectors.min()) + latent_vectors.min()
                 noisy[mask] = random_vals
+                return noisy
             elif noise_type == 'dropout':
-                mask = torch.rand_like(latent_vectors) > noise_factor
-                noisy = latent_vectors * mask
+                return latent_vectors * (torch.rand_like(latent_vectors) > noise_factor)
             elif noise_type == 'uniform':
-                noise = (torch.rand_like(latent_vectors) - 0.5) * 2 * noise_factor
-                noisy = latent_vectors + noise
+                return latent_vectors + (torch.rand_like(latent_vectors) - 0.5) * 2 * noise_factor
             else:
                 raise ValueError(f"Unknown noise type: {noise_type}")
-            return noisy
 
-        # ========================================
-        # Scheduler Setup
-        # ========================================
         def setup_scheduler(optimizer, scheduler_type='reduce_on_plateau', **kwargs):
             if scheduler_type is None or scheduler_type.lower() == 'none':
                 return None
-
             if scheduler_type.lower() == 'reduce_on_plateau':
-                scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                return optim.lr_scheduler.ReduceLROnPlateau(
                     optimizer, mode='min',
                     factor=kwargs.get('factor', 0.5),
                     patience=kwargs.get('patience', 5),
-                    min_lr=kwargs.get('min_lr', 1e-6)
-                )
+                    min_lr=kwargs.get('min_lr', 1e-6))
             elif scheduler_type.lower() == 'cosine':
-                scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                    optimizer,
-                    T_max=kwargs.get('T_max', 50),
-                    eta_min=kwargs.get('eta_min', 1e-6)
-                )
+                return optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer, T_max=kwargs.get('T_max', 50), eta_min=kwargs.get('eta_min', 1e-6))
             elif scheduler_type.lower() == 'step':
-                scheduler = optim.lr_scheduler.StepLR(
-                    optimizer,
-                    step_size=kwargs.get('step_size', 30),
-                    gamma=kwargs.get('gamma', 0.1)
-                )
+                return optim.lr_scheduler.StepLR(
+                    optimizer, step_size=kwargs.get('step_size', 30), gamma=kwargs.get('gamma', 0.1))
             elif scheduler_type.lower() == 'exponential':
-                scheduler = optim.lr_scheduler.ExponentialLR(
-                    optimizer,
-                    gamma=kwargs.get('gamma', 0.95)
-                )
+                return optim.lr_scheduler.ExponentialLR(optimizer, gamma=kwargs.get('gamma', 0.95))
             else:
                 raise ValueError(f"Unknown scheduler: {scheduler_type}")
 
-            logger.info(f"Scheduler: {scheduler_type}")
-            return scheduler
-
-        # ========================================
-        # Trainer Class
-        # ========================================
         class DAETrainer:
-            def __init__(self, model, device='cuda' if torch.cuda.is_available() else 'cpu'):
+            def __init__(self, model, device):
                 self.model = model.to(device)
                 self.device = device
                 self.train_losses = []
-                self.val_losses = []
+                self.val_losses   = []
 
-            def train_epoch(self, dataloader, criterion, optimizer,
-                            noise_type='gaussian', noise_factor=0.3):
+            def train_epoch(self, dataloader, criterion, optimizer, noise_type, noise_factor):
                 self.model.train()
                 epoch_loss = 0.0
-
-                for batch_idx, (clean_latents,) in enumerate(dataloader):
+                for (clean_latents,) in dataloader:
                     clean_latents = clean_latents.to(self.device)
                     noisy_latents = add_noise_to_latent(clean_latents, noise_type, noise_factor)
-
-                    reconstructed, encoded = self.model(noisy_latents)
+                    reconstructed, _ = self.model(noisy_latents)
                     loss = criterion(reconstructed, clean_latents)
-
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
-
                     epoch_loss += loss.item()
-
                 return epoch_loss / len(dataloader)
 
-            def validate_epoch(self, dataloader, criterion,
-                               noise_type='gaussian', noise_factor=0.3):
+            def validate_epoch(self, dataloader, criterion, noise_type, noise_factor):
                 self.model.eval()
                 epoch_loss = 0.0
-
                 with torch.no_grad():
-                    for batch_idx, (clean_latents,) in enumerate(dataloader):
+                    for (clean_latents,) in dataloader:
                         clean_latents = clean_latents.to(self.device)
                         noisy_latents = add_noise_to_latent(clean_latents, noise_type, noise_factor)
-
                         reconstructed, _ = self.model(noisy_latents)
-                        loss = criterion(reconstructed, clean_latents)
-                        epoch_loss += loss.item()
-
+                        epoch_loss += criterion(reconstructed, clean_latents).item()
                 return epoch_loss / len(dataloader)
 
-            def fit(self, train_loader, val_loader, criterion, optimizer, scheduler=None,
-                    epochs=100, noise_type='gaussian', noise_factor=0.3,
+            def fit(self, train_loader, val_loader, criterion, optimizer,
+                    model_config, optimizer_config, loss_type,   # ✅ passed in for saving
+                    scheduler=None, epochs=100,
+                    noise_type='gaussian', noise_factor=0.3,
                     early_stopping_patience=10, save_path='best_dae_model.pth'):
 
-                best_val_loss = float('inf')
+                best_val_loss    = float('inf')
                 patience_counter = 0
 
                 logger.info(f"Training on device: {self.device}")
@@ -316,10 +227,8 @@ implementation:
                 logger.info("-" * 60)
 
                 for epoch in range(epochs):
-                    train_loss = self.train_epoch(train_loader, criterion, optimizer,
-                                                  noise_type, noise_factor)
-                    val_loss = self.validate_epoch(val_loader, criterion,
-                                                   noise_type, noise_factor)
+                    train_loss = self.train_epoch(train_loader, criterion, optimizer, noise_type, noise_factor)
+                    val_loss   = self.validate_epoch(val_loader, criterion, noise_type, noise_factor)
 
                     self.train_losses.append(train_loss)
                     self.val_losses.append(val_loss)
@@ -337,14 +246,20 @@ implementation:
                                 f"LR: {current_lr:.6f}")
 
                     if val_loss < best_val_loss:
-                        best_val_loss = val_loss
+                        best_val_loss    = val_loss
                         patience_counter = 0
+
+                        # ✅ Save model_config + optimizer_config INSIDE the checkpoint
+                        #    so evaluate YAML never needs the init checkpoint
                         torch.save({
-                            'epoch': epoch,
-                            'model_state_dict': self.model.state_dict(),
+                            'epoch':                epoch,
+                            'model_state_dict':     self.model.state_dict(),
                             'optimizer_state_dict': optimizer.state_dict(),
-                            'train_loss': train_loss,
-                            'val_loss': val_loss,
+                            'train_loss':           train_loss,
+                            'val_loss':             val_loss,
+                            'model_config':         model_config,      # ✅ NEW
+                            'optimizer_config':     optimizer_config,  # ✅ NEW
+                            'loss_type':            loss_type,         # ✅ NEW
                         }, save_path)
                         logger.info(f"✓ Best model saved (Val Loss: {val_loss:.6f})")
                     else:
@@ -357,30 +272,15 @@ implementation:
                 logger.info(f"Training completed! Best Val Loss: {best_val_loss:.6f}")
                 logger.info("=" * 60)
 
-                checkpoint = torch.load(save_path)
-                self.model.load_state_dict(checkpoint['model_state_dict'])
-
+                loaded = torch.load(save_path)
+                self.model.load_state_dict(loaded['model_state_dict'])
                 return self.train_losses, self.val_losses
 
-        # ========================================
-        # Loss Function
-        # ========================================
         def get_loss_function(loss_type):
-            if loss_type.lower() == 'mse':
-                return nn.MSELoss()
-            elif loss_type.lower() == 'l1':
-                return nn.L1Loss()
-            elif loss_type.lower() == 'smooth_l1':
-                return nn.SmoothL1Loss()
-            elif loss_type.lower() == 'huber':
-                return nn.HuberLoss(delta=1.0)
-            else:
-                logger.warning(f"Unknown loss type: {loss_type}. Using MSE.")
-                return nn.MSELoss()
+            return {'mse': nn.MSELoss(), 'l1': nn.L1Loss(),
+                    'smooth_l1': nn.SmoothL1Loss(), 'huber': nn.HuberLoss(delta=1.0)}.get(
+                    loss_type.lower(), nn.MSELoss())
 
-        # ========================================
-        # Optimizer
-        # ========================================
         def get_optimizer(model, optimizer_type, lr, weight_decay):
             if optimizer_type.lower() == 'adam':
                 return optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -393,29 +293,21 @@ implementation:
                 return optim.RMSprop(model.parameters(), lr=lr,
                                      weight_decay=weight_decay, momentum=0.9)
             else:
-                logger.warning(f"Unknown optimizer: {optimizer_type}. Using Adam.")
                 return optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
         try:
-            # ========================================
-            # Set Random Seed
-            # ========================================
             set_seed(args.seed)
 
-            # ========================================
-            # Device Detection
-            # ========================================
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
             if torch.cuda.is_available():
-                device = 'cuda'
                 logger.info(f"✓ GPU detected: {torch.cuda.get_device_name(0)}")
                 logger.info(f"  GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
             else:
-                device = 'cpu'
                 logger.info("⚠ No GPU detected, using CPU")
 
-            # ========================================
-            # Load Model Checkpoint
-            # ========================================
+            # ============================================
+            # Load Init Checkpoint
+            # ============================================
             logger.info("=" * 60)
             logger.info("Loading Model Checkpoint")
             logger.info("=" * 60)
@@ -424,156 +316,98 @@ implementation:
             if not os.path.exists(model_checkpoint_path):
                 raise FileNotFoundError(f"Model checkpoint not found at: {model_checkpoint_path}")
 
-            checkpoint = torch.load(model_checkpoint_path, map_location=device)
-            logger.info(f"✓ Loaded checkpoint from: {model_checkpoint_path}")
-
-            model_config = checkpoint['model_config']
+            checkpoint       = torch.load(model_checkpoint_path, map_location=device)
+            model_config     = checkpoint['model_config']
             optimizer_config = checkpoint['optimizer_config']
-            loss_type = checkpoint['loss_type']
+            loss_type        = checkpoint['loss_type']
 
             logger.info(f"Model config     : {model_config}")
             logger.info(f"Optimizer config : {optimizer_config}")
             logger.info(f"Loss type        : {loss_type}")
 
-            # ========================================
-            # Reconstruct Model using encoder_dims
-            #    and decoder_dims (not hidden_dims)
-            # ========================================
+            # ============================================
+            # Reconstruct Model
+            # ============================================
             logger.info("=" * 60)
             logger.info("Reconstructing Model")
             logger.info("=" * 60)
 
             model = DenoisingAutoencoder(
-                input_dim=model_config['input_dim'],
-                encoder_dims=model_config['encoder_dims'],      #  fixed key
-                decoder_dims=model_config['decoder_dims'],      #  fixed key
-                latent_dim=model_config['latent_dim'],
-                dropout=model_config['dropout'],
-                activation=model_config.get('activation_function', 'relu'),
-                use_batch_norm=model_config.get('use_batch_norm', True)
+                input_dim      = model_config['input_dim'],
+                encoder_dims   = model_config['encoder_dims'],
+                decoder_dims   = model_config['decoder_dims'],
+                latent_dim     = model_config['latent_dim'],
+                dropout        = model_config['dropout'],
+                activation     = model_config.get('activation_function', 'relu'),
+                use_batch_norm = model_config.get('use_batch_norm', True)
             )
-
             model.load_state_dict(checkpoint['model_state_dict'])
             model = model.to(device)
 
-            logger.info(f"✓ Model reconstructed and loaded to {device}")
+            logger.info(f"✓ Model reconstructed to {device}")
             logger.info(f"  Encoder layers   : {model_config['encoder_dims']}")
             logger.info(f"  Decoder layers   : {model_config['decoder_dims']}")
             logger.info(f"  Total parameters : {sum(p.numel() for p in model.parameters()):,}")
 
-            # ========================================
+            # ============================================
             # Load Datasets
-            # ========================================
+            # ============================================
             logger.info("=" * 60)
             logger.info("Loading Datasets")
             logger.info("=" * 60)
 
-            train_dataset_path = os.path.join(args.train_dataset, 'train_dataset.pt')
-            train_data = torch.load(train_dataset_path, map_location='cpu')
-            logger.info(f"✓ Loaded train dataset: {train_data.shape}, dtype: {train_data.dtype}")
-
-            val_dataset_path = os.path.join(args.val_dataset, 'val_dataset.pt')
-            val_data = torch.load(val_dataset_path, map_location='cpu')
-            logger.info(f"✓ Loaded validation dataset: {val_data.shape}, dtype: {val_data.dtype}")
-
-            # ========================================
-            #  FIX: Handle dtype mismatch (float16 data vs float32 model)
-            # ========================================
-            data_dtype = train_data.dtype
-            model_dtype = next(model.parameters()).dtype
-            
-            logger.info(f"Data dtype: {data_dtype}, Model dtype: {model_dtype}")
-            
-            if data_dtype != model_dtype:
-                logger.warning(f"⚠ Dtype mismatch detected!")
-                
-                if data_dtype == torch.float16:
-                    # Option 1: Convert model to float16 (memory efficient)
-                    logger.info("Converting model to float16...")
-                    model = model.half()
-                    logger.info("✓ Model converted to float16")
-                else:
-                    # Option 2: Convert data to float32 (standard approach)
-                    logger.info("Converting data to float32...")
-                    train_data = train_data.float()
-                    val_data = val_data.float()
-                    logger.info("✓ Data converted to float32")
-            else:
-                logger.info("✓ Dtypes match - no conversion needed")
-
+            train_data    = torch.load(os.path.join(args.train_dataset, 'train_dataset.pt'), map_location='cpu')
+            val_data      = torch.load(os.path.join(args.val_dataset,   'val_dataset.pt'),   map_location='cpu')
             train_dataset = TensorDataset(train_data)
-            val_dataset = TensorDataset(val_data)
+            val_dataset   = TensorDataset(val_data)
+            logger.info(f"✓ Train dataset: {train_data.shape}")
+            logger.info(f"✓ Val dataset  : {val_data.shape}")
 
-            train_loader = DataLoader(
-                train_dataset,
-                batch_size=args.batch_size,
-                shuffle=True,
-                num_workers=args.num_workers,
-                pin_memory=True if device == 'cuda' else False
-            )
-
-            val_loader = DataLoader(
-                val_dataset,
-                batch_size=args.batch_size,
-                shuffle=False,
-                num_workers=args.num_workers,
-                pin_memory=True if device == 'cuda' else False
-            )
-
+            train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
+                                      shuffle=True,  num_workers=args.num_workers,
+                                      pin_memory=True if device == 'cuda' else False)
+            val_loader   = DataLoader(val_dataset,   batch_size=args.batch_size,
+                                      shuffle=False, num_workers=args.num_workers,
+                                      pin_memory=True if device == 'cuda' else False)
             logger.info(f"✓ Train batches : {len(train_loader)}")
             logger.info(f"✓ Val batches   : {len(val_loader)}")
 
-            # ========================================
+            # ============================================
             # Setup Training Components
-            # ========================================
-            logger.info("=" * 60)
-            logger.info("Setting up Training Components")
-            logger.info("=" * 60)
-
+            # ============================================
             criterion = get_loss_function(loss_type)
-            logger.info(f"✓ Loss function: {loss_type}")
-
-            optimizer = get_optimizer(
-                model,
-                optimizer_config['type'],
-                optimizer_config['lr'],
-                optimizer_config['weight_decay']
-            )
+            optimizer = get_optimizer(model, optimizer_config['type'],
+                                      optimizer_config['lr'], optimizer_config['weight_decay'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            logger.info(f"✓ Optimizer: {optimizer_config['type']}")
+            scheduler = setup_scheduler(optimizer, scheduler_type=args.scheduler_type,
+                                        factor=args.scheduler_factor, patience=args.scheduler_patience,
+                                        min_lr=args.scheduler_min_lr, T_max=args.epochs)
 
-            scheduler = setup_scheduler(
-                optimizer,
-                scheduler_type=args.scheduler_type,
-                factor=args.scheduler_factor,
-                patience=args.scheduler_patience,
-                min_lr=args.scheduler_min_lr,
-                T_max=args.epochs
-            )
-
-            # ========================================
-            # Train Model
-            # ========================================
+            # ============================================
+            # Train
+            # ============================================
             logger.info("=" * 60)
             logger.info("Starting Training")
             logger.info("=" * 60)
-            logger.info(f"Epochs                   : {args.epochs}")
-            logger.info(f"Batch size               : {args.batch_size}")
-            logger.info(f"Noise type               : {args.noise_type}")
-            logger.info(f"Noise factor             : {args.noise_factor}")
-            logger.info(f"Early stopping patience  : {args.early_stopping_patience}")
-            logger.info("=" * 60)
-
-            trainer = DAETrainer(model, device=device)
+            logger.info(f"Epochs                  : {args.epochs}")
+            logger.info(f"Batch size              : {args.batch_size}")
+            logger.info(f"Noise type              : {args.noise_type}")
+            logger.info(f"Noise factor            : {args.noise_factor}")
+            logger.info(f"Early stopping patience : {args.early_stopping_patience}")
 
             os.makedirs(args.trained_model, exist_ok=True)
             best_model_path = os.path.join(args.trained_model, 'best_trained_model.pth')
 
+            trainer = DAETrainer(model, device=device)
             train_losses, val_losses = trainer.fit(
                 train_loader=train_loader,
                 val_loader=val_loader,
                 criterion=criterion,
                 optimizer=optimizer,
+                #  Pass configs so they get saved inside the checkpoint
+                model_config=model_config,
+                optimizer_config=optimizer_config,
+                loss_type=loss_type,
                 scheduler=scheduler,
                 epochs=args.epochs,
                 noise_type=args.noise_type,
@@ -582,58 +416,47 @@ implementation:
                 save_path=best_model_path
             )
 
-            # ========================================
+            # ============================================
             # Save Training History
-            # ========================================
-            logger.info("=" * 60)
-            logger.info("Saving Training History")
-            logger.info("=" * 60)
-
+            # ============================================
             os.makedirs(args.training_history, exist_ok=True)
-
             history = {
-                'train_losses': train_losses,
-                'val_losses': val_losses,
-                'epochs_trained': len(train_losses),
-                'best_val_loss': min(val_losses),
+                'train_losses':    train_losses,
+                'val_losses':      val_losses,
+                'epochs_trained':  len(train_losses),
+                'best_val_loss':   min(val_losses),
                 'final_train_loss': train_losses[-1],
-                'final_val_loss': val_losses[-1],
+                'final_val_loss':   val_losses[-1],
                 'training_config': {
-                    'epochs': args.epochs,
-                    'batch_size': args.batch_size,
-                    'noise_type': args.noise_type,
-                    'noise_factor': args.noise_factor,
-                    'scheduler_type': args.scheduler_type,
-                    'early_stopping_patience': args.early_stopping_patience
+                    'epochs':                   args.epochs,
+                    'batch_size':               args.batch_size,
+                    'noise_type':               args.noise_type,
+                    'noise_factor':             args.noise_factor,
+                    'scheduler_type':           args.scheduler_type,
+                    'early_stopping_patience':  args.early_stopping_patience
                 }
             }
-
             history_path = os.path.join(args.training_history, 'training_history.json')
             with open(history_path, 'w') as f:
                 json.dump(history, f, indent=2)
-            logger.info(f"✓ Training history saved to: {history_path}")
 
             with open(args.training_history + ".meta.json", "w") as f:
-                json.dump({
-                    "history_path": history_path,
-                    "epochs_trained": len(train_losses),
-                    "best_val_loss": min(val_losses)
-                }, f, indent=2)
+                json.dump({"history_path": history_path,
+                           "epochs_trained": len(train_losses),
+                           "best_val_loss": min(val_losses)}, f, indent=2)
 
             with open(args.trained_model + ".meta.json", "w") as f:
-                json.dump({
-                    "model_path": best_model_path,
-                    "best_val_loss": min(val_losses),
-                    "epochs_trained": len(train_losses)
-                }, f, indent=2)
+                json.dump({"model_path": best_model_path,
+                           "best_val_loss": min(val_losses),
+                           "epochs_trained": len(train_losses)}, f, indent=2)
 
             logger.info("=" * 60)
             logger.info("✓ Training Complete!")
             logger.info("=" * 60)
-            logger.info(f"Best model        : {best_model_path}")
-            logger.info(f"Training history  : {history_path}")
-            logger.info(f"Best val loss     : {min(val_losses):.6f}")
-            logger.info(f"Epochs trained    : {len(train_losses)}")
+            logger.info(f"Best model       : {best_model_path}")
+            logger.info(f"Training history : {history_path}")
+            logger.info(f"Best val loss    : {min(val_losses):.6f}")
+            logger.info(f"Epochs trained   : {len(train_losses)}")
 
         except Exception as e:
             logger.exception(f"Fatal error during training: {str(e)}")
