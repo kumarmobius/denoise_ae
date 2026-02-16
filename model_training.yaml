@@ -1,4 +1,4 @@
-name: Train Denoising Autoencoder Model v3.1
+name: Train Denoising Autoencoder Model v3.2
 inputs:
   - {name: model_input, type: Data}
   - {name: train_dataset, type: Data}
@@ -436,7 +436,7 @@ implementation:
             logger.info(f"Loss type        : {loss_type}")
 
             # ========================================
-            # ✅ Reconstruct Model using encoder_dims
+            # Reconstruct Model using encoder_dims
             #    and decoder_dims (not hidden_dims)
             # ========================================
             logger.info("=" * 60)
@@ -445,8 +445,8 @@ implementation:
 
             model = DenoisingAutoencoder(
                 input_dim=model_config['input_dim'],
-                encoder_dims=model_config['encoder_dims'],      # ✅ fixed key
-                decoder_dims=model_config['decoder_dims'],      # ✅ fixed key
+                encoder_dims=model_config['encoder_dims'],      #  fixed key
+                decoder_dims=model_config['decoder_dims'],      #  fixed key
                 latent_dim=model_config['latent_dim'],
                 dropout=model_config['dropout'],
                 activation=model_config.get('activation_function', 'relu'),
@@ -477,7 +477,7 @@ implementation:
             logger.info(f"✓ Loaded validation dataset: {val_data.shape}, dtype: {val_data.dtype}")
 
             # ========================================
-            # 🔧 FIX: Handle dtype mismatch (float16 data vs float32 model)
+            #  FIX: Handle dtype mismatch (float16 data vs float32 model)
             # ========================================
             data_dtype = train_data.dtype
             model_dtype = next(model.parameters()).dtype
