@@ -1,0 +1,502 @@
+name: Dataset downloader and splitter with preprocess
+inputs:
+  - {name: z_test_cdn, type: String, optional: false}
+  - {name: test_size, type: Float, optional: true, default: "0.3"}
+  - {name: val_split, type: Float, optional: true, default: "0.5"}
+  - {name: random_state, type: Integer, optional: true, default: "42"}
+  - {name: batch_size, type: Integer, optional: true, default: "32"}
+  - {name: num_workers, type: Integer, optional: true, default: "0"}
+  - {name: apply_scaling, type: String, optional: true, default: "true"}
+  - {name: convert_to_float16, type: String, optional: true, default: "false"}
+
+outputs:
+  - {name: tensor_values, type: Data}
+  - {name: train_dataset, type: Data}
+  - {name: val_dataset, type: Data}
+  - {name: test_dataset, type: Data}
+  - {name: scaler_output, type: Data}
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v1
+    command:
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, os, sys, tempfile, json, shutil, logging, pickle
+        import numpy as np
+        import pandas as pd
+        import torch
+        from torch.utils.data import Dataset, DataLoader, TensorDataset
+        import requests
+        from requests.adapters import HTTPAdapter
+        try:
+            from urllib3.util import Retry
+        except Exception:
+            from urllib3 import Retry
+        from sklearn.model_selection import train_test_split
+        from sklearn.preprocessing import StandardScaler
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--z_test_cdn', required=True)
+        parser.add_argument('--test_size', type=float, default=0.3)
+        parser.add_argument('--val_split', type=float, default=0.5)
+        parser.add_argument('--random_state', type=int, default=42)
+        parser.add_argument('--batch_size', type=int, default=32)
+        parser.add_argument('--num_workers', type=int, default=0)
+        parser.add_argument('--apply_scaling', type=str, default='true')
+        parser.add_argument('--convert_to_float16', type=str, default='false')
+        parser.add_argument('--tensor_values', required=True)
+        parser.add_argument('--train_dataset', required=True)
+        parser.add_argument('--val_dataset', required=True)
+        parser.add_argument('--test_dataset', required=True)
+        parser.add_argument('--scaler_output', required=True)
+        args = parser.parse_args()
+
+        logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+        logger = logging.getLogger("pytorch_dataset_downloader_splitter")
+
+        # Convert string to boolean
+        apply_scaling = args.apply_scaling.lower() in ('true', '1', 'yes')
+        convert_to_float16 = args.convert_to_float16.lower() in ('true', '1', 'yes')
+
+        logger.info("="*60)
+        logger.info("Configuration:")
+        logger.info(f"  Apply StandardScaler: {apply_scaling}")
+        logger.info(f"  Convert to float16: {convert_to_float16}")
+        logger.info("="*60)
+
+        # Setup session with retry logic
+        session = requests.Session()
+        retry = Retry(total=5, backoff_factor=1, status_forcelist=[500,502,503,504])
+        session.mount("http://", HTTPAdapter(max_retries=retry))
+        session.mount("https://", HTTPAdapter(max_retries=retry))
+
+        headers = {}
+
+        # ============================================
+        # DEBUG HELPER — prints full stats for a tensor
+        # ============================================
+        def debug_tensor(tensor, name="tensor"):
+            nan_count  = torch.isnan(tensor).sum().item()
+            inf_count  = torch.isinf(tensor).sum().item()
+            total      = tensor.numel()
+
+            logger.info("=" * 55)
+            logger.info(f"[DEBUG] {name}")
+            logger.info(f"  Shape       : {list(tensor.shape)}")
+            logger.info(f"  Dtype       : {tensor.dtype}")
+            logger.info(f"  Total values: {total:,}")
+            logger.info(f"  NaN count   : {nan_count:,}  ({100*nan_count/total:.4f}%)")
+            logger.info(f"  Inf count   : {inf_count:,}  ({100*inf_count/total:.4f}%)")
+            
+            valid_mask = ~torch.isnan(tensor) & ~torch.isinf(tensor)
+            if valid_mask.any():
+                logger.info(f"  Min value   : {tensor[valid_mask].min().item():.6f}")
+                logger.info(f"  Max value   : {tensor[valid_mask].max().item():.6f}")
+                logger.info(f"  Mean value  : {tensor[valid_mask].mean().item():.6f}")
+                logger.info(f"  Std value   : {tensor[valid_mask].std().item():.6f}")
+
+            if nan_count > 0:
+                nan_cols = torch.isnan(tensor).any(dim=0).nonzero(as_tuple=True)[0].tolist()
+                logger.warning(f"  ⚠ NaN found in {len(nan_cols)} feature column(s): {nan_cols[:20]}"
+                               f"{'...' if len(nan_cols) > 20 else ''}")
+            if inf_count > 0:
+                inf_cols = torch.isinf(tensor).any(dim=0).nonzero(as_tuple=True)[0].tolist()
+                logger.warning(f"  ⚠ Inf found in {len(inf_cols)} feature column(s): {inf_cols[:20]}"
+                               f"{'...' if len(inf_cols) > 20 else ''}")
+            logger.info("=" * 55)
+
+        # ============================================
+        # CLEANER — replaces NaN and Inf with zeros
+        # ============================================
+        def clean_tensor(tensor, name="tensor"):
+            nan_before = torch.isnan(tensor).sum().item()
+            inf_before = torch.isinf(tensor).sum().item()
+
+            if nan_before == 0 and inf_before == 0:
+                logger.info(f"[CLEAN] {name}: ✓ No NaN or Inf values found — no cleaning needed")
+                return tensor
+
+            logger.warning(f"[CLEAN] {name}: Replacing {nan_before:,} NaN and {inf_before:,} Inf values with 0")
+
+            # Replace NaN and Inf with 0
+            tensor = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+
+            # Verify after cleaning
+            nan_after = torch.isnan(tensor).sum().item()
+            inf_after = torch.isinf(tensor).sum().item()
+            logger.info(f"[CLEAN] {name}: After cleaning → NaN: {nan_after}, Inf: {inf_after}")
+
+            return tensor
+
+        def download_file(url):
+            try:
+                logger.info("Downloading from: %s", url)
+                r = session.get(url, headers=headers, timeout=60)
+                r.raise_for_status()
+                fd, tmp = tempfile.mkstemp()
+                os.close(fd)
+                with open(tmp, "wb") as f:
+                    f.write(r.content)
+                logger.info("Successfully downloaded to: %s", tmp)
+                return tmp
+            except Exception as e:
+                logger.error("Download failed for %s: %s", url, str(e))
+                raise
+
+        def load_data_multi_format(file_path):
+            logger.info("Loading data from: %s", file_path)
+
+            strategies = [
+                {
+                    'name': 'PyTorch Tensor',
+                    'func': lambda: torch.load(file_path, map_location='cpu').numpy()
+                            if isinstance(torch.load(file_path, map_location='cpu'), torch.Tensor)
+                            else torch.load(file_path, map_location='cpu')
+                },
+                {'name': 'NumPy (.npy)',  'func': lambda: np.load(file_path, allow_pickle=True)},
+                {'name': 'NumPy (.npz)',  'func': lambda: np.load(file_path, allow_pickle=True)['data']},
+                {'name': 'Parquet',       'func': lambda: pd.read_parquet(file_path, engine="pyarrow").values},
+                {'name': 'CSV',           'func': lambda: pd.read_csv(file_path).values},
+                {'name': 'Excel',         'func': lambda: pd.read_excel(file_path).values},
+                {'name': 'TSV',           'func': lambda: pd.read_csv(file_path, sep='\t').values},
+            ]
+
+            last_error = None
+            for strategy in strategies:
+                try:
+                    logger.info("Trying to load as: %s", strategy['name'])
+                    data = strategy['func']()
+
+                    if isinstance(data, torch.Tensor):
+                        data = data.numpy()
+                    elif not isinstance(data, np.ndarray):
+                        data = np.array(data)
+
+                    logger.info("✓ Successfully loaded as %s with shape: %s",
+                                strategy['name'], data.shape)
+                    return data
+                except Exception as e:
+                    logger.debug("Failed to load as %s: %s", strategy['name'], str(e))
+                    last_error = e
+                    continue
+
+            logger.error("All loading strategies failed!")
+            raise RuntimeError(f"Could not load file with any supported format. Last error: {last_error}")
+
+        def get_tensor_size_mb(tensor):
+            return tensor.element_size() * tensor.nelement() / (1024 * 1024)
+
+        def save_tensor_output(tensor, output_path, data_name):
+            os.makedirs(output_path, exist_ok=True)
+            save_path = os.path.join(output_path, f"{data_name}.pt")
+            torch.save(tensor, save_path)
+            logger.info("Saved %s to: %s", data_name, save_path)
+            with open(output_path + ".meta.json", "w") as f:
+                json.dump({"tensor_path": save_path,
+                           "shape": list(tensor.shape),
+                           "dtype": str(tensor.dtype)}, f)
+            return save_path
+
+        def save_pytorch_dataset(dataset_tensor, output_path, dataset_name):
+            os.makedirs(output_path, exist_ok=True)
+            save_path = os.path.join(output_path, f"{dataset_name}.pt")
+            torch.save(dataset_tensor, save_path)
+            logger.info("Saved %s to: %s", dataset_name, save_path)
+            with open(output_path + ".meta.json", "w") as f:
+                json.dump({"dataset_path": save_path,
+                           "shape": list(dataset_tensor.shape),
+                           "dtype": str(dataset_tensor.dtype)}, f)
+            return save_path
+
+        try:
+            # ============================================
+            # Download and Load Data
+            # ============================================
+            logger.info("Downloading Z_test data...")
+            z_test_file = download_file(args.z_test_cdn)
+            Z_test = load_data_multi_format(z_test_file)
+            os.remove(z_test_file)
+            logger.info("Z_test shape: %s", Z_test.shape)
+
+            # ============================================
+            # DEBUG RAW NUMPY — check before any conversion
+            # ============================================
+            logger.info("[DEBUG] Raw numpy array stats:")
+            logger.info(f"  dtype   : {Z_test.dtype}")
+            logger.info(f"  shape   : {Z_test.shape}")
+            logger.info(f"  NaN     : {np.isnan(Z_test).sum():,}")
+            logger.info(f"  Inf     : {np.isinf(Z_test).sum():,}")
+            logger.info(f"  Min     : {np.nanmin(Z_test):.6f}")
+            logger.info(f"  Max     : {np.nanmax(Z_test):.6f}")
+            logger.info(f"  Mean    : {np.nanmean(Z_test):.6f}")
+
+            # ============================================
+            # Keep as float32 for processing
+            # ============================================
+            Z_test = Z_test.astype(np.float32)
+
+            # ============================================
+            # Convert to PyTorch tensor
+            # ============================================
+            Z_test_tensor = torch.FloatTensor(Z_test)
+            logger.info("Tensor Memory (float32): %.2f MB", get_tensor_size_mb(Z_test_tensor))
+
+            # ============================================
+            # DEBUG + CLEAN full tensor
+            # ============================================
+            debug_tensor(Z_test_tensor, name="Z_test_tensor (full, before clean)")
+            Z_test_tensor = clean_tensor(Z_test_tensor, name="Z_test_tensor")
+            debug_tensor(Z_test_tensor, name="Z_test_tensor (full, after clean)")
+
+            # ============================================
+            # Save Full Tensor as Output (before splitting)
+            # ============================================
+            logger.info("Saving full tensor output...")
+            tensor_values_path = save_tensor_output(
+                Z_test_tensor, args.tensor_values, "tensor_values"
+            )
+            logger.info("✓ Saved full tensor: %s", tensor_values_path)
+
+            # ============================================
+            # Split into Train / Val / Test
+            # ============================================
+            logger.info("Splitting data with test_size=%s, val_split=%s",
+                        args.test_size, args.val_split)
+
+            # Use numpy for splitting
+            Z_np = Z_test_tensor.numpy()
+
+            Z_train_val, Z_test_split = train_test_split(
+                Z_np, test_size=args.test_size, random_state=args.random_state
+            )
+            Z_train, Z_val = train_test_split(
+                Z_train_val, test_size=args.val_split, random_state=args.random_state
+            )
+
+            logger.info("Split sizes:")
+            logger.info("  Train : %s", Z_train.shape)
+            logger.info("  Val   : %s", Z_val.shape)
+            logger.info("  Test  : %s", Z_test_split.shape)
+
+            # ============================================
+            # Apply StandardScaler if enabled
+            # ============================================
+            scaler = None
+            if apply_scaling:
+                logger.info("="*60)
+                logger.info("Applying StandardScaler")
+                logger.info("="*60)
+                
+                # Fit scaler on training data only
+                scaler = StandardScaler()
+                Z_train_scaled = scaler.fit_transform(Z_train)
+                
+                logger.info("✓ Scaler fitted on training data")
+                logger.info(f"  Mean shape: {scaler.mean_.shape}")
+                logger.info(f"  Std shape: {scaler.scale_.shape}")
+                logger.info(f"  Mean range: [{scaler.mean_.min():.6f}, {scaler.mean_.max():.6f}]")
+                logger.info(f"  Std range: [{scaler.scale_.min():.6f}, {scaler.scale_.max():.6f}]")
+                
+                # Transform validation and test data using the fitted scaler
+                Z_val_scaled = scaler.transform(Z_val)
+                Z_test_scaled = scaler.transform(Z_test_split)
+                
+                logger.info("✓ Applied scaling to all splits")
+                logger.info(f"  Train scaled range: [{Z_train_scaled.min():.6f}, {Z_train_scaled.max():.6f}]")
+                logger.info(f"  Val scaled range: [{Z_val_scaled.min():.6f}, {Z_val_scaled.max():.6f}]")
+                logger.info(f"  Test scaled range: [{Z_test_scaled.min():.6f}, {Z_test_scaled.max():.6f}]")
+                
+                # Use scaled data
+                Z_train = Z_train_scaled
+                Z_val = Z_val_scaled
+                Z_test_split = Z_test_scaled
+                
+                # Save scaler
+                os.makedirs(args.scaler_output, exist_ok=True)
+                scaler_path = os.path.join(args.scaler_output, 'scaler.pkl')
+                with open(scaler_path, 'wb') as f:
+                    pickle.dump(scaler, f)
+                logger.info(f"✓ Saved scaler to: {scaler_path}")
+                
+                # Save scaler statistics
+                scaler_stats = {
+                    'mean': scaler.mean_.tolist(),
+                    'std': scaler.scale_.tolist(),
+                    'n_features': scaler.n_features_in_,
+                    'n_samples_seen': int(scaler.n_samples_seen_)
+                }
+                stats_path = os.path.join(args.scaler_output, 'scaler_stats.json')
+                with open(stats_path, 'w') as f:
+                    json.dump(scaler_stats, f, indent=2)
+                logger.info(f"✓ Saved scaler statistics to: {stats_path}")
+                
+                # Save metadata
+                with open(args.scaler_output + ".meta.json", "w") as f:
+                    json.dump({
+                        "scaler_path": scaler_path,
+                        "stats_path": stats_path,
+                        "n_features": scaler.n_features_in_,
+                        "applied": True
+                    }, f, indent=2)
+            else:
+                logger.info("⚠ StandardScaler disabled - using unscaled data")
+                # Save empty scaler output
+                os.makedirs(args.scaler_output, exist_ok=True)
+                with open(args.scaler_output + ".meta.json", "w") as f:
+                    json.dump({"applied": False}, f, indent=2)
+
+            # ============================================
+            # Convert splits to tensors
+            # ============================================
+            logger.info("Converting splits to PyTorch tensors...")
+            Z_train_tensor      = torch.FloatTensor(Z_train)
+            Z_val_tensor        = torch.FloatTensor(Z_val)
+            Z_test_split_tensor = torch.FloatTensor(Z_test_split)
+
+            # ============================================
+            # DEBUG + CLEAN each split individually
+            # ============================================
+            logger.info("--- Debugging and cleaning each split ---")
+
+            debug_tensor(Z_train_tensor, name="Train split (before clean)")
+            Z_train_tensor = clean_tensor(Z_train_tensor, name="Train split")
+
+            debug_tensor(Z_val_tensor, name="Val split (before clean)")
+            Z_val_tensor = clean_tensor(Z_val_tensor, name="Val split")
+
+            debug_tensor(Z_test_split_tensor, name="Test split (before clean)")
+            Z_test_split_tensor = clean_tensor(Z_test_split_tensor, name="Test split")
+
+            logger.info("✓ All splits cleaned and verified")
+
+            # ============================================
+            # Convert to float16 AFTER all preprocessing
+            # ============================================
+            if convert_to_float16:
+                logger.info("="*60)
+                logger.info("Converting to float16 (after preprocessing)")
+                logger.info("="*60)
+                
+                # Check if values are within float16 range
+                float16_max = 65504.0
+                for name, tensor in [("Train", Z_train_tensor), 
+                                      ("Val", Z_val_tensor), 
+                                      ("Test", Z_test_split_tensor)]:
+                    max_val = tensor.abs().max().item()
+                    if max_val > float16_max:
+                        logger.warning(f"⚠ {name} has values ({max_val:.2f}) exceeding float16 max ({float16_max})")
+                        logger.warning("  Values will be clipped to prevent overflow!")
+                
+                # Convert to float16
+                Z_train_tensor = Z_train_tensor.half()
+                Z_val_tensor = Z_val_tensor.half()
+                Z_test_split_tensor = Z_test_split_tensor.half()
+                
+                logger.info("✓ Converted all splits to float16")
+                logger.info(f"  Train memory: {get_tensor_size_mb(Z_train_tensor):.2f} MB")
+                logger.info(f"  Val memory: {get_tensor_size_mb(Z_val_tensor):.2f} MB")
+                logger.info(f"  Test memory: {get_tensor_size_mb(Z_test_split_tensor):.2f} MB")
+                
+                # Final check for NaN/Inf after conversion
+                debug_tensor(Z_train_tensor, name="Train (after float16)")
+                debug_tensor(Z_val_tensor, name="Val (after float16)")
+                debug_tensor(Z_test_split_tensor, name="Test (after float16)")
+
+            # ============================================
+            # Create DataLoaders
+            # ============================================
+            logger.info("Creating DataLoaders with batch_size=%s, num_workers=%s",
+                        args.batch_size, args.num_workers)
+
+            train_dataset = TensorDataset(Z_train_tensor)
+            val_dataset   = TensorDataset(Z_val_tensor)
+            test_dataset  = TensorDataset(Z_test_split_tensor)
+
+            train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
+                                      shuffle=True, num_workers=args.num_workers,
+                                      pin_memory=True, drop_last=False)
+            val_loader   = DataLoader(val_dataset,   batch_size=args.batch_size,
+                                      shuffle=False, num_workers=args.num_workers,
+                                      pin_memory=True, drop_last=False)
+            test_loader  = DataLoader(test_dataset,  batch_size=args.batch_size,
+                                      shuffle=False, num_workers=args.num_workers,
+                                      pin_memory=True, drop_last=False)
+
+            logger.info("✓ Created DataLoaders")
+            logger.info("  Train batches : %d", len(train_loader))
+            logger.info("  Val batches   : %d", len(val_loader))
+            logger.info("  Test batches  : %d", len(test_loader))
+
+            # ============================================
+            # Final sanity check — first batch of each
+            # ============================================
+            logger.info("--- Final batch sanity check ---")
+            for loader, split_name in [(train_loader, "Train"),
+                                        (val_loader,   "Val"),
+                                        (test_loader,  "Test")]:
+                batch = next(iter(loader))[0]
+                nan_b = torch.isnan(batch).sum().item()
+                inf_b = torch.isinf(batch).sum().item()
+                logger.info(f"  {split_name} first batch | shape: {list(batch.shape)} "
+                            f"| dtype: {batch.dtype} | NaN: {nan_b} | Inf: {inf_b} "
+                            f"| Min: {batch.min():.4f} | Max: {batch.max():.4f}")
+
+            # ============================================
+            # Save Split Datasets
+            # ============================================
+            logger.info("Saving PyTorch datasets...")
+
+            train_path = save_pytorch_dataset(Z_train_tensor,      args.train_dataset, "train_dataset")
+            val_path   = save_pytorch_dataset(Z_val_tensor,        args.val_dataset,   "val_dataset")
+            test_path  = save_pytorch_dataset(Z_test_split_tensor, args.test_dataset,  "test_dataset")
+
+            logger.info("="*60)
+            logger.info("✓ All datasets saved successfully!")
+            logger.info("="*60)
+            logger.info("  Full tensor : %s", tensor_values_path)
+            logger.info("  Train       : %s", train_path)
+            logger.info("  Val         : %s", val_path)
+            logger.info("  Test        : %s", test_path)
+            if apply_scaling:
+                logger.info("  Scaler      : %s", scaler_path)
+            logger.info("="*60)
+            logger.info(f"Final configuration:")
+            logger.info(f"  Scaling applied: {apply_scaling}")
+            logger.info(f"  Float16 conversion: {convert_to_float16}")
+            logger.info(f"  Data type: {Z_train_tensor.dtype}")
+            logger.info("="*60)
+
+        except Exception as e:
+            logger.exception("Fatal error in dataset processing: %s", str(e))
+            sys.exit(1)
+
+    args:
+      - --z_test_cdn
+      - {inputValue: z_test_cdn}
+      - --test_size
+      - {inputValue: test_size}
+      - --val_split
+      - {inputValue: val_split}
+      - --random_state
+      - {inputValue: random_state}
+      - --batch_size
+      - {inputValue: batch_size}
+      - --num_workers
+      - {inputValue: num_workers}
+      - --apply_scaling
+      - {inputValue: apply_scaling}
+      - --convert_to_float16
+      - {inputValue: convert_to_float16}
+      - --tensor_values
+      - {outputPath: tensor_values}
+      - --train_dataset
+      - {outputPath: train_dataset}
+      - --val_dataset
+      - {outputPath: val_dataset}
+      - --test_dataset
+      - {outputPath: test_dataset}
+      - --scaler_output
+      - {outputPath: scaler_output}
