@@ -1,11 +1,9 @@
-name: Evaluate Denoising Autoencoder Model V2.3
+name: Evaluate Denoising Autoencoder Model V2.4
 inputs:
   - {name: trained_model, type: Model}
   - {name: test_dataset, type: Data}
   - {name: batch_size, type: Integer, optional: true, default: "32"}
   - {name: num_workers, type: Integer, optional: true, default: "0"}
-  - {name: noise_type, type: String, optional: true, default: "gaussian"}
-  - {name: noise_factor, type: Float, optional: true, default: "0.3"}
   - {name: compute_metrics, type: String, optional: true, default: "True"}
   - {name: seed, type: Integer, optional: true, default: "42"}
 
@@ -43,8 +41,6 @@ implementation:
         parser.add_argument('--test_dataset', required=True)
         parser.add_argument('--batch_size', type=int, default=32)
         parser.add_argument('--num_workers', type=int, default=0)
-        parser.add_argument('--noise_type', type=str, default='gaussian')
-        parser.add_argument('--noise_factor', type=float, default=0.3)
         parser.add_argument('--compute_metrics', type=lambda x: x.lower() == 'true', default=True)
         parser.add_argument('--seed', type=int, default=42)
         parser.add_argument('--evaluation_results', required=True)
@@ -135,6 +131,8 @@ implementation:
             def decode(self, z): return self.decoder(z)
 
         def add_noise_to_latent(latent_vectors, noise_type='gaussian', noise_factor=0.3):
+            if noise_factor == 0.0:
+                return latent_vectors
             if noise_type == 'gaussian':
                 return latent_vectors + torch.randn_like(latent_vectors) * noise_factor
             elif noise_type == 'salt_pepper':
@@ -200,9 +198,6 @@ implementation:
             else:
                 logger.info("⚠ No GPU detected, using CPU")
 
-            # ============================================
-            # Load Trained Model checkpoint
-            # ============================================
             logger.info("=" * 60)
             logger.info("Loading Trained Model")
             logger.info("=" * 60)
@@ -217,10 +212,6 @@ implementation:
             logger.info(f"  Training loss  : {checkpoint['train_loss']:.6f}")
             logger.info(f"  Validation loss: {checkpoint['val_loss']:.6f}")
 
-            # ============================================
-            # ✅ Read model_config directly from checkpoint
-            #    No need for init checkpoint at all
-            # ============================================
             if 'model_config' not in checkpoint:
                 raise KeyError(
                     "model_config not found in best_trained_model.pth. "
@@ -232,7 +223,7 @@ implementation:
             optimizer_config = checkpoint.get('optimizer_config', {})
             loss_type        = checkpoint.get('loss_type', 'mse')
 
-            logger.info(f"✓ model_config loaded directly from checkpoint — no init file needed")
+            logger.info(f"✓ model_config loaded directly from checkpoint")
             logger.info(f"  input_dim      : {model_config['input_dim']}")
             logger.info(f"  encoder_dims   : {model_config['encoder_dims']}")
             logger.info(f"  decoder_dims   : {model_config['decoder_dims']}")
@@ -240,6 +231,19 @@ implementation:
             logger.info(f"  activation     : {model_config.get('activation_function', 'relu')}")
             logger.info(f"  use_batch_norm : {model_config.get('use_batch_norm', True)}")
             logger.info(f"  dropout        : {model_config['dropout']}")
+            if 'noise' in model_config:
+                noise_type   = model_config['noise']['noise_type']
+                noise_factor = model_config['noise']['noise_factor']
+                logger.info(f"✓ Using noise config from training:")
+                logger.info(f"  noise_type     : {noise_type}")
+                logger.info(f"  noise_factor   : {noise_factor}")
+            else:
+                # Fallback for old checkpoints without noise config
+                logger.warning("⚠ No noise config in checkpoint — using defaults")
+                noise_type   = 'gaussian'
+                noise_factor = 0.3
+                logger.info(f"  noise_type     : {noise_type} (default)")
+                logger.info(f"  noise_factor   : {noise_factor} (default)")
 
             # ============================================
             # Reconstruct Model
@@ -272,8 +276,8 @@ implementation:
             logger.info("Loading Test Dataset")
             logger.info("=" * 60)
 
-            test_data       = torch.load(os.path.join(args.test_dataset, 'test_dataset.pt'), map_location='cpu')
-            test_dataset    = TensorDataset(test_data)
+            test_data    = torch.load(os.path.join(args.test_dataset, 'test_dataset.pt'), map_location='cpu')
+            test_dataset = TensorDataset(test_data)
             logger.info(f"✓ Loaded test dataset: {test_data.shape}")
 
             test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
@@ -288,12 +292,10 @@ implementation:
             logger.info("=" * 60)
             logger.info("Evaluating Model on Test Set")
             logger.info("=" * 60)
-            logger.info(f"Noise type   : {args.noise_type}")
-            logger.info(f"Noise factor : {args.noise_factor}")
 
             all_originals, all_noisy, all_reconstructed, all_encoded = evaluate_model(
                 model=model, dataloader=test_loader, device=device,
-                noise_type=args.noise_type, noise_factor=args.noise_factor
+                noise_type=noise_type, noise_factor=noise_factor
             )
             logger.info(f"✓ Evaluation complete — processed {len(all_originals)} samples")
 
@@ -324,8 +326,8 @@ implementation:
                 'metrics': metrics,
                 'test_samples': len(all_originals),
                 'evaluation_config': {
-                    'noise_type':   args.noise_type,
-                    'noise_factor': args.noise_factor,
+                    'noise_type':   noise_type,
+                    'noise_factor': noise_factor,
                     'batch_size':   args.batch_size
                 },
                 'model_info': {
@@ -334,6 +336,8 @@ implementation:
                     'validation_loss': float(checkpoint['val_loss']),
                     'encoder_dims':    model_config['encoder_dims'],
                     'decoder_dims':    model_config['decoder_dims'],
+                    'noise_type':      noise_type,
+                    'noise_factor':    noise_factor,
                 }
             }
             results_path = os.path.join(args.evaluation_results, 'evaluation_results.json')
@@ -376,14 +380,16 @@ implementation:
             ensure_dir_for(args.schema_json)
             with open(args.schema_json, "w") as f:
                 json.dump(schema_data, f, indent=2)
-            logger.info(f"✓ Schema JSON saved to: {args.schema_json}")
+            logger.info(f"✓ Schema JSON saved: {args.schema_json}")
 
             logger.info("=" * 60)
             logger.info("✓ Evaluation Complete!")
             logger.info("=" * 60)
-            logger.info(f"Test MSE    : {metrics.get('mse',      0.0):.6f}")
-            logger.info(f"Test RMSE   : {metrics.get('rmse',     0.0):.6f}")
-            logger.info(f"R² Score    : {metrics.get('r2_score', 0.0):.6f}")
+            logger.info(f"  Noise type      : {noise_type}")
+            logger.info(f"  Noise factor    : {noise_factor}")
+            logger.info(f"  Test MSE        : {metrics.get('mse',      0.0):.6f}")
+            logger.info(f"  Test RMSE       : {metrics.get('rmse',     0.0):.6f}")
+            logger.info(f"  R² Score        : {metrics.get('r2_score', 0.0):.6f}")
 
         except Exception as e:
             logger.exception(f"Fatal error during evaluation: {str(e)}")
@@ -398,10 +404,6 @@ implementation:
       - {inputValue: batch_size}
       - --num_workers
       - {inputValue: num_workers}
-      - --noise_type
-      - {inputValue: noise_type}
-      - --noise_factor
-      - {inputValue: noise_factor}
       - --compute_metrics
       - {inputValue: compute_metrics}
       - --seed
