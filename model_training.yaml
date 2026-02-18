@@ -1,4 +1,4 @@
-name: Train Denoising Autoencoder Model v3.3
+name: Train Denoising Autoencoder Model v3.4
 inputs:
   - {name: model_input, type: Data}
   - {name: train_dataset, type: Data}
@@ -214,7 +214,7 @@ implementation:
                 return epoch_loss / len(dataloader)
 
             def fit(self, train_loader, val_loader, criterion, optimizer,
-                    model_config, optimizer_config, loss_type,   # ✅ passed in for saving
+                    model_config, optimizer_config, loss_type, 
                     scheduler=None, epochs=100,
                     noise_type='gaussian', noise_factor=0.3,
                     early_stopping_patience=10, save_path='best_dae_model.pth'):
@@ -248,18 +248,15 @@ implementation:
                     if val_loss < best_val_loss:
                         best_val_loss    = val_loss
                         patience_counter = 0
-
-                        # ✅ Save model_config + optimizer_config INSIDE the checkpoint
-                        #    so evaluate YAML never needs the init checkpoint
                         torch.save({
                             'epoch':                epoch,
                             'model_state_dict':     self.model.state_dict(),
                             'optimizer_state_dict': optimizer.state_dict(),
                             'train_loss':           train_loss,
                             'val_loss':             val_loss,
-                            'model_config':         model_config,      # ✅ NEW
-                            'optimizer_config':     optimizer_config,  # ✅ NEW
-                            'loss_type':            loss_type,         # ✅ NEW
+                            'model_config':         model_config,      
+                            'optimizer_config':     optimizer_config,  
+                            'loss_type':            loss_type,         
                         }, save_path)
                         logger.info(f"✓ Best model saved (Val Loss: {val_loss:.6f})")
                     else:
@@ -304,10 +301,6 @@ implementation:
                 logger.info(f"  GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
             else:
                 logger.info("⚠ No GPU detected, using CPU")
-
-            # ============================================
-            # Load Init Checkpoint
-            # ============================================
             logger.info("=" * 60)
             logger.info("Loading Model Checkpoint")
             logger.info("=" * 60)
@@ -324,10 +317,14 @@ implementation:
             logger.info(f"Model config     : {model_config}")
             logger.info(f"Optimizer config : {optimizer_config}")
             logger.info(f"Loss type        : {loss_type}")
+            if 'noise' not in model_config:
+                model_config['noise'] = {}
+            model_config['noise']['noise_type']   = args.noise_type
+            model_config['noise']['noise_factor'] = args.noise_factor
+            logger.info(f"✓ Updated model_config with noise params:")
+            logger.info(f"  noise_type   : {args.noise_type}")
+            logger.info(f"  noise_factor : {args.noise_factor}")
 
-            # ============================================
-            # Reconstruct Model
-            # ============================================
             logger.info("=" * 60)
             logger.info("Reconstructing Model")
             logger.info("=" * 60)
@@ -349,9 +346,7 @@ implementation:
             logger.info(f"  Decoder layers   : {model_config['decoder_dims']}")
             logger.info(f"  Total parameters : {sum(p.numel() for p in model.parameters()):,}")
 
-            # ============================================
             # Load Datasets
-            # ============================================
             logger.info("=" * 60)
             logger.info("Loading Datasets")
             logger.info("=" * 60)
@@ -372,9 +367,8 @@ implementation:
             logger.info(f"✓ Train batches : {len(train_loader)}")
             logger.info(f"✓ Val batches   : {len(val_loader)}")
 
-            # ============================================
+            
             # Setup Training Components
-            # ============================================
             criterion = get_loss_function(loss_type)
             optimizer = get_optimizer(model, optimizer_config['type'],
                                       optimizer_config['lr'], optimizer_config['weight_decay'])
@@ -383,9 +377,7 @@ implementation:
                                         factor=args.scheduler_factor, patience=args.scheduler_patience,
                                         min_lr=args.scheduler_min_lr, T_max=args.epochs)
 
-            # ============================================
             # Train
-            # ============================================
             logger.info("=" * 60)
             logger.info("Starting Training")
             logger.info("=" * 60)
@@ -404,7 +396,6 @@ implementation:
                 val_loader=val_loader,
                 criterion=criterion,
                 optimizer=optimizer,
-                #  Pass configs so they get saved inside the checkpoint
                 model_config=model_config,
                 optimizer_config=optimizer_config,
                 loss_type=loss_type,
@@ -416,9 +407,7 @@ implementation:
                 save_path=best_model_path
             )
 
-            # ============================================
             # Save Training History
-            # ============================================
             os.makedirs(args.training_history, exist_ok=True)
             history = {
                 'train_losses':    train_losses,
